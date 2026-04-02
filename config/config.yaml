@@ -1,0 +1,51 @@
+basic:
+  platform: binance
+  symbol: BTCUSDT
+  timeframe_4h: 4h
+  timeframe_daily: 1d
+  buypoint: 6
+  mode: paper
+  max_attempts: 3
+
+data:
+  realdata_dir: realdatas
+  kline_4h_file: realdatas/BTC_USDT_3year_4h.xlsx
+  kline_1d_file: realdatas/BTC_USDT_3year_daily.xlsx
+  fetch_limit_4h: 500
+  fetch_limit_1d: 300
+  sync_on_start: true
+
+status:
+  status_file: config/status.json
+
+trade:
+  paper_trade: false
+  quantity: 0.001
+
+network:
+  proxy: "http://127.0.0.1:7897"
+
+runtime:
+  run_forever: true
+  run_delay_seconds: 5
+
+backtest:
+  eval_exit:
+    enabled: true
+  eval_execution_15m:
+    enabled: false
+  back_test:
+    enabled: true
+
+logging:
+  console:
+    enabled: true
+    level: DEBUG
+    format: "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>"
+  file:
+    enabled: true
+    level: DEBUG
+    path: "D:/RobotTest/workspace/trade_agent/reports"
+    rotation: "100 MB"
+    retention: "7 days"
+    compression: "zip"

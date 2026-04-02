@@ -1,0 +1,10 @@
+{
+  "service_status": "running",
+  "position_status": "flat",
+  "current_phase": "exit_check",
+  "last_processed_4h_bar_time": "2026-04-02T08:00:00",
+  "entry_price": 0.0,
+  "entry_time": "",
+  "last_action": "EXIT",
+  "last_score": 9.0
+}
