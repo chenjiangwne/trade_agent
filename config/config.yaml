@@ -3,7 +3,7 @@ basic:
   symbol: BTCUSDT
   timeframe_4h: 4h
   timeframe_daily: 1d
-  buypoint: 6
+  buypoint: 14
   mode: paper
   max_attempts: 3
 
@@ -14,6 +14,10 @@ data:
   fetch_limit_4h: 500
   fetch_limit_1d: 300
   sync_on_start: true
+  validation:
+    min_rows_4h: 200
+    min_rows_1d: 60
+    max_sync_attempts: 3
 
 status:
   status_file: config/status.json
@@ -21,13 +25,18 @@ status:
 trade:
   paper_trade: false
   quantity: 0.001
+  exit_freeze_bars: 3
 
 network:
   proxy: "http://127.0.0.1:7897"
 
+notify:
+  channel: mock
+
 runtime:
   run_forever: true
   run_delay_seconds: 5
+  max_clock_diff_seconds: 60
 
 backtest:
   eval_exit:
@@ -46,6 +55,6 @@ logging:
     enabled: true
     level: DEBUG
     path: "D:/RobotTest/workspace/trade_agent/reports"
-    rotation: "100 MB"
+    rotation: "10 MB"
     retention: "7 days"
     compression: "zip"

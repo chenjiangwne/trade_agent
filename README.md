@@ -1,6 +1,6 @@
 # trade_agent
 
-基于 4H K 线的交易代理项目。当前版本已经接通真实历史数据文件、Binance 增量拉取、4 小时调度、状态持久化和文件日志。
+基于 4H K 线的交易代理项目。当前版本已经接通 Binance 行情同步、数据校验与自动修复、4H 定时调度、状态持久化、失败通知 mock 和文件日志。
 
 ## 会话记录
 
@@ -8,50 +8,54 @@
 
 ## 当前能力
 
-- 读取本地真实数据文件作为基础数据源
-- 通过 Binance 接口增量同步最新已闭合 `4h` 和 `1d` K 线
-- 基于 `status.json` 维护运行状态，避免重复处理同一个 4H bar
-- 按策略分数生成 `BUY / EXIT / HOLD / SKIP`
-- 支持 `paper_trade` 和 `live` 两种执行模式
-- 日志自动落到 `reports/`
-- 支持按 4 小时闭合时间持续运行
+- 读取本地 `realdatas/` 历史数据
+- 每次打分前自动校验数据正确性和连续性
+- 校验失败时自动从 Binance 同步并重试，最多 3 次
+- 3 次仍失败时走 `push_message` mock 告警
+- 以 Binance 交易所时间为准调度下一次 4H 执行
+- 要求交易所时间与本机时间偏差不超过 60 秒
+- 打分后把总分 `score` 和 `metrics` 打到日志
+- 使用 `status.json` 维护服务状态和仓位状态
+- 支持 `paper_trade` 和 `live` 模式
 
-## 项目结构
+## 目录结构
 
 - `app/main.py`
-  程序入口。读取配置、初始化日志，并按配置执行单轮或循环调度。
+  程序入口。负责读取配置、初始化日志并进入循环调度。
 
 - `app/orchestrator.py`
-  主流程调度器。串联状态读取、市场数据同步、策略决策、执行和状态回写。
-
-- `services/status_service.py`
-  统一管理 `config/status.json` 的读写。
+  主流程调度器。负责串联市场数据、决策、执行和状态回写。
 
 - `services/market_data_service.py`
-  负责市场数据加载与同步。
-  当前逻辑：
-  1. 优先读取 `realdatas/` 里的真实历史文件
-  2. 通过 Binance 增量获取最新已闭合 bar
-  3. 合并、去重、回写到本地数据文件
-  4. 计算下一个 4H bar 的运行时间
+  市场数据服务。负责：
+  - 读取本地数据文件
+  - 从 Binance 增量同步数据
+  - 自动修复尾部缺口
+  - 校验 OHLCV、排序、重复、连续性和最小 K 线数量
+  - 获取交易所时间并校验本地时间偏差
 
 - `services/decision_service.py`
-  调用 `strategy/FourHour_long.py` 的策略逻辑，生成标准化交易动作。
+  负责把策略结果标准化为：
+  - `action`
+  - `score`
+  - `metrics`
 
 - `services/execution_service.py`
-  根据动作执行交易。
-  当前行为：
-  - `paper_trade: true` 时只更新状态，不下单
-  - `paper_trade: false` 时尝试读取环境变量中的 Binance API 密钥下单
+  执行层。
+  - `paper_trade: true` 时只模拟执行
+  - `paper_trade: false` 时尝试按 Binance API 下单
+
+- `services/status_service.py`
+  管理 `config/status.json` 的读写。
+
+- `services/push_message.py`
+  失败通知服务，当前为 mock 版本。
 
 - `strategy/FourHour_long.py`
-  4H Long 策略实现，包含入场评分和离场判断。
-
-- `generic/Common.py`
-  通用配置读取和 traceback 工具。
+  4H Long 策略逻辑。
 
 - `generic/logger.py`
-  日志初始化，支持控制台和文件输出。
+  日志初始化模块。
 
 - `config/config.yaml`
   主配置文件。
@@ -60,95 +64,167 @@
   运行状态文件。
 
 - `realdatas/`
-  本地历史行情文件目录。
+  本地历史数据文件目录。
 
 - `reports/`
-  日志输出目录。
+  日志目录。
 
-## 数据文件
+## 数据源与数据文件
 
-当前默认使用以下文件：
+默认数据文件：
 
 - `realdatas/BTC_USDT_3year_4h.xlsx`
 - `realdatas/BTC_USDT_3year_daily.xlsx`
 
-系统启动后会：
+如果切换标的，需要同步修改：
 
-1. 读取本地 `.xlsx` 文件
-2. 用 Binance 最新已闭合 bar 增量更新
-3. 把合并后的数据写回原文件
+- `basic.symbol`
+- `data.kline_4h_file`
+- `data.kline_1d_file`
 
-如果你切换交易标的，需要同步修改 `config/config.yaml` 里的 `basic.symbol` 和数据文件路径。
+## 打分前的数据校验
+
+每次进入策略打分前，系统都会先校验数据，不满足条件不会直接进入评分。
+
+校验项包括：
+
+- 是否包含 `timestamp/open/high/low/close/volume`
+- 时间戳是否可解析
+- 时间是否升序
+- 是否有重复时间戳
+- OHLC 是否合理
+- 时间序列是否连续
+- 最新连续区间是否满足最少 K 线数量
+
+默认最少数量：
+
+- `4h`: 200 根
+- `1d`: 60 根
+
+## 数据异常时的处理流程
+
+如果本地数据校验失败：
+
+1. 自动从 Binance 同步最新数据
+2. 重新校验
+3. 最多重试 3 次
+4. 如果仍失败：
+   - 记录 error 日志
+   - 通过 `services/push_message.py` 发送 mock 失败通知
+   - 本轮停止，不进入打分
+
+## 交易所时间规则
+
+4H 任务不是按本机时间触发，而是按 Binance 时间触发。
+
+当前规则：
+
+- 每轮运行前先获取 Binance 时间
+- 校验本机和交易所时间偏差
+- 偏差必须小于等于 60 秒
+- 超过 60 秒，本轮视为异常并终止
+- 下一次 4H bar 的等待时间按交易所时间计算
+
+相关配置：
+
+```yaml
+runtime:
+  run_forever: true
+  run_delay_seconds: 5
+  max_clock_diff_seconds: 60
+```
+
+## 评分日志
+
+每次打分或决策后，日志都会打印：
+
+- `decision`
+- `score`
+- `metrics`
+
+示例：
+
+```text
+decision=BUY score=9.0 metrics=daily_above_ema200 | daily_ema200_rising | 4h_ema50_above_ema200
+```
 
 ## 配置说明
 
 ### `basic`
 
-- `platform`: 当前为 `binance`
-- `symbol`: 当前为 `BTCUSDT`
-- `timeframe_4h`: 4 小时级别
-- `timeframe_daily`: 日线级别
-- `buypoint`: 入场阈值
+- `platform`
+  当前为 `binance`
+
+- `symbol`
+  当前为 `BTCUSDT`
+
+- `timeframe_4h`
+  当前为 `4h`
+
+- `timeframe_daily`
+  当前为 `1d`
+
+- `buypoint`
+  入场阈值
 
 ### `data`
 
-- `realdata_dir`: 本地数据目录
-- `kline_4h_file`: 4H 数据文件路径
-- `kline_1d_file`: 日线数据文件路径
-- `sync_on_start`: 启动时是否先同步最新数据
+- `realdata_dir`
+  本地数据目录
+
+- `kline_4h_file`
+  4H 数据文件路径
+
+- `kline_1d_file`
+  1D 数据文件路径
+
+- `sync_on_start`
+  每轮开始前是否先同步交易所数据
+
+- `validation.min_rows_4h`
+  4H 最少连续 K 线数量
+
+- `validation.min_rows_1d`
+  1D 最少连续 K 线数量
+
+- `validation.max_sync_attempts`
+  校验失败后的最大同步尝试次数
 
 ### `trade`
 
-- `paper_trade: true`
-  只模拟执行，不真实下单
-
-- `paper_trade: false`
-  启用真实下单逻辑，但前提是你已经提供 Binance API 环境变量
+- `paper_trade`
+  - `true`：模拟执行
+  - `false`：真实下单
 
 - `quantity`
   下单数量
 
+- `exit_freeze_bars`
+  持仓后冻结的 4H K 线数量。
+  在冻结期内不会执行 exit 逻辑，系统会直接返回 `HOLD`。
+  当前默认值为 `3`。
+
 ### `network`
 
 - `proxy`
-  当前配置为：
+  当前配置：
   `http://127.0.0.1:7897`
 
-如果代理不可用，Binance 请求会失败。
+### `notify`
 
-### `runtime`
-
-- `run_forever`
-  `true` 表示程序会持续运行，等待每个新的 4H bar
-
-- `run_delay_seconds`
-  到达下一个 4H 边界后额外延迟几秒执行，避免拿到未完全闭合的 bar
+- `channel`
+  当前为 `mock`
 
 ### `logging`
 
 - `console.enabled`
-  是否输出到控制台
+  是否输出控制台日志
 
 - `file.enabled`
-  是否写入日志文件
+  是否写入文件日志
 
 - `file.path`
-  日志目录，当前为 `reports/`
-
-## 状态文件
-
-`config/status.json` 是整个系统的单一状态源，包含：
-
-- `service_status`
-- `position_status`
-- `current_phase`
-- `last_processed_4h_bar_time`
-- `entry_price`
-- `entry_time`
-- `last_action`
-- `last_score`
-
-系统每轮运行都会先读取状态，再根据最新 bar 结果更新。
+  当前为 `reports/`
 
 ## 运行方式
 
@@ -158,15 +234,20 @@
 python app/main.py
 ```
 
-默认行为：
+默认流程：
 
-- 启动时同步一次最新 4H / 1D 数据
-- 运行一轮决策
-- 如果 `runtime.run_forever: true`，则等待下一个 4H bar 再继续运行
+1. 初始化日志
+2. 启动先读取 `status.json`
+3. 如果 `service_status == error`：
+   - 直接记录 error 日志
+   - 发送 `push_message` mock
+   - 结束程序
+4. 如果 `service_status != error`：
+   - 第 1 轮强制走一次完整流程，不因为 `last_processed_4h_bar_time` 而跳过
+   - 用于验证当前打分链路和状态写入是否正常
+5. 从第 2 轮开始，再按交易所时间等待下一个 4H bar
 
-## 实盘模式说明
-
-当前项目已经具备 live 模式入口，但不会硬编码密钥。
+## 实盘模式
 
 如果要启用真实下单，需要先设置环境变量：
 
@@ -175,49 +256,52 @@ $env:BINANCE_API_KEY="your_api_key"
 $env:BINANCE_SECRET_KEY="your_secret_key"
 ```
 
-然后确保：
+并确保：
 
-- `config.yaml` 中 `trade.paper_trade: false`
+- `trade.paper_trade: false`
 - 代理可用
-- Binance 账户和 API 权限正确
+- 本机时间和交易所时间偏差在允许范围内
+- Binance API 权限正确
 
-否则程序会记录 live 模式请求，但跳过真实下单。
+如果未设置密钥，程序会记录 warning，但不会真实下单。
 
 ## 日志
 
-日志会写到：
+日志输出到：
 
 - `reports/trade_agent_YYYY-MM-DD.log`
 
-日志中会记录：
+日志内容包括：
 
-- 数据同步
+- 行情同步
+- 数据校验
+- 时钟校验
 - 策略决策
-- 状态变化
-- live / paper 执行情况
-- 错误信息
+- 总分与 metrics
+- 执行结果
+- 失败通知
 
-## 当前已验证
+## 当前已实现的失败通知
 
-已验证通过的链路：
+`services/push_message.py` 当前还是 mock 实现。
 
-- 通过代理访问 Binance
-- 增量拉取最新 4H / 1D 数据
-- 把数据写回 `.xlsx`
-- 读取已有状态并执行一轮决策
-- 把日志写入 `reports/`
+失败时会：
+
+- 把 title / content 打到日志
+- 返回 `status=mock_sent`
+
+后续可以扩展成飞书、企业微信或 Telegram。
 
 ## 已知限制
 
-- 当前策略文件存在部分历史中文注释编码残留，但不影响运行
-- 如果 Binance 代理不稳定，增量同步可能超时
-- live 模式是否真实下单，取决于环境变量中的密钥是否已设置
-- 当前执行层只接了基础 market order 流程，没有做更复杂的风控和成交校验
+- 当前数据文件仍是本地 `.xlsx`
+- 如果手动打开 `.xlsx`，Windows 可能锁文件，影响同步写回
+- `push_message` 目前不是正式通知通道
+- 执行层目前是基础 market order 模型，没有补完整的风控和成交确认
 
-## 下一步建议
+## 后续建议
 
-- 增加启动参数，支持单轮运行和后台常驻运行切换
-- 增加异常重试和网络超时恢复
-- 增加订单查询与成交确认
-- 增加 15m 执行优化逻辑
-- 增加 Docker 部署配置
+- 把 `push_message` 接成正式通知通道
+- 给 live 下单补成交确认和异常回滚
+- 增加 15m 执行层过滤
+- 增加 Docker / 守护进程部署方式

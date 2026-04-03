@@ -415,7 +415,7 @@ def testsuite_result(df_4h,df_daily):
                 res = Res['OK']
                 return res,total_socres,None
         else:
-            logger.info(f"NOK! The preconditions are not met,the score is>>{regime.score+position.score}<<")
+            logger.warning(f"NOK! The preconditions are not met,the score is>>{regime.score+position.score}<<")
             return res,total_socres,None
     except Exception as e:
         logger.error(f"NOK! err:{e}")
