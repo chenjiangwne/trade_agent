@@ -203,7 +203,7 @@ def _validate_market_frame(
             report["last_gap_at"],
         )
     else:
-        logger.info("{} validation passed with {} continuous rows", label, report["tail_rows"])
+        logger.debug("{} validation passed with {} continuous rows", label, report["tail_rows"])
 
     return continuous_df, report
 
@@ -319,7 +319,7 @@ def sync_latest_ohlcv(project_root: Path, config: dict[str, Any], timeframe: str
     exchange = _build_exchange(config)
     symbol = _symbol_to_exchange_symbol(config["basic"]["symbol"])
 
-    logger.info("sync {} {} -> {}", symbol, timeframe, path.name)
+    logger.warning("NOK! sync {} {} -> {}", symbol, timeframe, path.name)
     incoming = _fetch_incremental_bars(exchange, symbol, timeframe, existing, exchange_now=exchange_now)
     merged = _merge_incremental_data(existing, incoming)
     if merged.empty:
@@ -330,54 +330,92 @@ def sync_latest_ohlcv(project_root: Path, config: dict[str, Any], timeframe: str
     return path
 
 
+def _latest_closed_bar_time_from_exchange(
+    config: dict[str, Any],
+    timeframe: str,
+    exchange_now: pd.Timestamp,
+) -> pd.Timestamp:
+    exchange = _build_exchange(config)
+    symbol = _symbol_to_exchange_symbol(config["basic"]["symbol"])
+    bars = _fetch_closed_bars(exchange, symbol, timeframe, exchange_now=exchange_now, since=None, limit=10)
+    if bars.empty:
+        raise RuntimeError(f"NOK! exchange has no closed {timeframe} bar for {symbol}")
+    return pd.Timestamp(bars.iloc[-1]["timestamp"])
+
+
+def _is_local_closed_bar_aligned(
+    project_root: Path,
+    config: dict[str, Any],
+    timeframe: str,
+    exchange_now: pd.Timestamp,
+) -> bool:
+    path = _resolve_data_file(project_root, config, timeframe)
+    local_df = _load_table(path)
+    exchange_latest = _latest_closed_bar_time_from_exchange(config, timeframe, exchange_now)
+
+    if local_df.empty:
+        logger.error(
+            "NOK! local {} data file is empty, exchange latest closed bar is {}",
+            timeframe,
+            exchange_latest.isoformat(),
+        )
+        return False
+
+    local_latest = pd.Timestamp(local_df.iloc[-1]["timestamp"])
+    if local_latest != exchange_latest:
+        logger.error(
+            "NOK! local/exchange {} closed bar mismatch, local_latest={} exchange_latest={}",
+            timeframe,
+            local_latest.isoformat(),
+            exchange_latest.isoformat(),
+        )
+        return False
+
+    logger.info("local/exchange {} closed bar aligned: {}", timeframe, local_latest.isoformat())
+    return True
+
+
 def load_market_data(project_root: Path, config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, str]:
     timeframe_4h = config["basic"]["timeframe_4h"]
     timeframe_daily = config["basic"]["timeframe_daily"]
-    data_config = config["data"]
-    validation_config = data_config.get("validation", {})
+    validation_config = config["data"].get("validation", {})
     min_rows_4h = int(validation_config.get("min_rows_4h", 200))
     min_rows_1d = int(validation_config.get("min_rows_1d", 60))
-    max_sync_attempts = int(validation_config.get("max_sync_attempts", 3))
-    should_sync = bool(data_config.get("sync_on_start", True))
 
-    last_error: Exception | None = None
-    total_attempts = max_sync_attempts if should_sync else 1
+    exchange_now = fetch_exchange_clock(config)["exchange_now"]
+    bar_4h_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now)
+    bar_1d_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now)
 
-    for attempt in range(1, total_attempts + 1):
-        try:
-            clock = fetch_exchange_clock(config)
-            exchange_now = clock["exchange_now"]
-            if should_sync:
-                logger.info("market data validation cycle {}/{}: sync from exchange first", attempt, total_attempts)
-                _sync_required_timeframes(project_root, config, exchange_now=exchange_now)
+    if not bar_4h_ok or not bar_1d_ok:
+        logger.warning("local xlsx closed bar time is not aligned with exchange, start sync")
+        sync_latest_ohlcv(project_root, config, timeframe_4h, exchange_now=exchange_now)
+        time.sleep(0.2)
+        sync_latest_ohlcv(project_root, config, timeframe_daily, exchange_now=exchange_now)
 
-            df_4h = _load_table(_resolve_data_file(project_root, config, timeframe_4h))
-            df_daily = _load_table(_resolve_data_file(project_root, config, timeframe_daily))
+        if not _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now):
+            raise RuntimeError("NOK! 4h xlsx latest closed bar is still not aligned after sync")
+        if not _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now):
+            raise RuntimeError("NOK! 1d xlsx latest closed bar is still not aligned after sync")
 
-            if df_4h.empty or df_daily.empty:
-                raise RuntimeError("market data files are empty after sync")
+    df_4h = _load_table(_resolve_data_file(project_root, config, timeframe_4h))
+    df_daily = _load_table(_resolve_data_file(project_root, config, timeframe_daily))
 
-            df_4h, report_4h = _validate_market_frame(df_4h, timeframe_4h, min_rows_4h, "4h market data")
-            df_daily, report_1d = _validate_market_frame(df_daily, timeframe_daily, min_rows_1d, "1d market data")
+    if df_4h.empty or df_daily.empty:
+        raise RuntimeError("NOK! market data files are empty after sync")
 
-            logger.info(
-                "market data ready: 4h_rows={} 1d_rows={} 4h_gaps={} 1d_gaps={}",
-                len(df_4h),
-                len(df_daily),
-                report_4h["gap_count"],
-                report_1d["gap_count"],
-            )
+    df_4h, report_4h = _validate_market_frame(df_4h, timeframe_4h, min_rows_4h, "4h market data")
+    df_daily, report_1d = _validate_market_frame(df_daily, timeframe_daily, min_rows_1d, "1d market data")
 
-            latest_bar_time = str(pd.to_datetime(df_4h.iloc[-1]["timestamp"]).isoformat())
-            return df_4h, df_daily, latest_bar_time
-        except Exception as exc:
-            last_error = exc
-            logger.error("market data validation failed on attempt {}/{}: {}", attempt, total_attempts, exc)
-            if attempt >= total_attempts:
-                break
-            time.sleep(1)
+    logger.info(
+        "market data ready: 4h_rows={} 1d_rows={} 4h_gaps={} 1d_gaps={}",
+        len(df_4h),
+        len(df_daily),
+        report_4h["gap_count"],
+        report_1d["gap_count"],
+    )
 
-    raise RuntimeError(f"market data validation failed after {total_attempts} attempts: {last_error}")
+    latest_bar_time = str(pd.to_datetime(df_4h.iloc[-1]["timestamp"]).isoformat())
+    return df_4h, df_daily, latest_bar_time
 
 
 def seconds_until_next_4h_bar(now: pd.Timestamp | None = None, offset_seconds: int = 5) -> int:

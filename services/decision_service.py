@@ -115,16 +115,16 @@ def _normalize_reason(reason: Any) -> str:
 
 
 def _log_scoring_inputs(df_4h: pd.DataFrame, df_daily: pd.DataFrame, latest_bar_time: str) -> None:
-    logger.debug(
-        "scoring input summary: latest_4h_bar={} 4h_rows={} daily_rows={} 4h_start={} 4h_end={} daily_start={} daily_end={}",
-        latest_bar_time,
-        len(df_4h),
-        len(df_daily),
-        _safe_timestamp(df_4h, 0),
-        _safe_timestamp(df_4h, -1),
-        _safe_timestamp(df_daily, 0),
-        _safe_timestamp(df_daily, -1),
-    )
+    # logger.debug(
+    #     "scoring input summary: latest_4h_bar={} 4h_rows={} daily_rows={} 4h_start={} 4h_end={} daily_start={} daily_end={}",
+    #     latest_bar_time,
+    #     len(df_4h),
+    #     len(df_daily),
+    #     _safe_timestamp(df_4h, 0),
+    #     _safe_timestamp(df_4h, -1),
+    #     _safe_timestamp(df_daily, 0),
+    #     _safe_timestamp(df_daily, -1),
+    # )
     logger.debug("scoring input 4h tail={}", _tail_records(df_4h, 6))
     logger.debug("scoring input daily tail={}", _tail_records(df_daily, 6))
 

@@ -2,7 +2,7 @@
   "service_status": "running",
   "position_status": "flat",
   "current_phase": "idle",
-  "last_processed_4h_bar_time": "2026-04-02T20:00:00",
+  "last_processed_4h_bar_time": "2026-04-12T00:00:00",
   "entry_price": 0.0,
   "entry_time": "",
   "last_action": "SKIP",

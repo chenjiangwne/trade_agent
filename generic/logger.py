@@ -1,4 +1,4 @@
-import os
+﻿import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 from loguru import logger
 
 
-def init_report(config, attempt):
+def init_report(config, attempt, log_name="trade_agent"):
     """Description: log file initialization"""
     logger.remove()
     if config["console"]["enabled"]:
@@ -21,7 +21,7 @@ def init_report(config, attempt):
         repo_dir.mkdir(parents=True, exist_ok=True)
         current_time = datetime.now()
         formatted_time = current_time.strftime("%Y-%m-%d")
-        log_file = repo_dir / f"trade_agent_{formatted_time}.log"
+        log_file = repo_dir / f"{log_name}_{formatted_time}.log"
 
         logger.add(
             str(log_file),
