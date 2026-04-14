@@ -155,17 +155,11 @@ def _last_gap_repair_since(existing: pd.DataFrame, timeframe: str) -> int | None
     if existing.empty:
         return None
 
-    expected = _expected_delta(timeframe)
-    diffs = existing["timestamp"].diff()
-    bad_gaps = diffs[(diffs.notna()) & (diffs != expected)]
-    if bad_gaps.empty:
-        last_ts = pd.Timestamp(existing.iloc[-1]["timestamp"])
-        return int(last_ts.timestamp() * 1000) - _timeframe_milliseconds(timeframe)
-
-    last_gap_index = int(bad_gaps.index[-1])
-    prev_index = max(last_gap_index - 1, 0)
-    prev_ts = pd.Timestamp(existing.iloc[prev_index]["timestamp"])
-    return int(prev_ts.timestamp() * 1000)
+    # For live sync, always increment from the latest local bar.
+    # Historical gaps are reported by validation, but should not force
+    # the incremental fetch to rewind far into old history and miss the newest bars.
+    last_ts = pd.Timestamp(existing.iloc[-1]["timestamp"])
+    return int(last_ts.timestamp() * 1000) - _timeframe_milliseconds(timeframe)
 
 
 def _validate_market_frame(
@@ -209,8 +203,11 @@ def _validate_market_frame(
 
 
 def _sync_required_timeframes(project_root: Path, config: dict[str, Any], exchange_now: pd.Timestamp) -> None:
+    timeframe_1h = config["basic"]["timeframe_1h"]
     timeframe_4h = config["basic"]["timeframe_4h"]
     timeframe_daily = config["basic"]["timeframe_daily"]
+    sync_latest_ohlcv(project_root, config, timeframe_1h, exchange_now=exchange_now)
+    time.sleep(0.2)
     sync_latest_ohlcv(project_root, config, timeframe_4h, exchange_now=exchange_now)
     time.sleep(0.2)
     sync_latest_ohlcv(project_root, config, timeframe_daily, exchange_now=exchange_now)
@@ -229,7 +226,17 @@ def _save_table(df: pd.DataFrame, path: Path) -> None:
 
 def _resolve_data_file(project_root: Path, config: dict[str, Any], timeframe: str) -> Path:
     data_config = config["data"]
-    explicit_key = "kline_4h_file" if timeframe == config["basic"]["timeframe_4h"] else "kline_1d_file"
+    timeframe_1h = config["basic"]["timeframe_1h"]
+    timeframe_4h = config["basic"]["timeframe_4h"]
+    timeframe_daily = config["basic"]["timeframe_daily"]
+    if timeframe == timeframe_1h:
+        explicit_key = "kline_1h_file"
+    elif timeframe == timeframe_4h:
+        explicit_key = "kline_4h_file"
+    elif timeframe == timeframe_daily:
+        explicit_key = "kline_1d_file"
+    else:
+        raise ValueError(f"Unsupported timeframe file mapping: {timeframe}")
     explicit = data_config.get(explicit_key)
     if explicit:
         explicit_path = project_root / explicit
@@ -237,7 +244,9 @@ def _resolve_data_file(project_root: Path, config: dict[str, Any], timeframe: st
             return explicit_path
 
     prefix = _symbol_to_file_prefix(config["basic"]["symbol"])
-    if timeframe == config["basic"]["timeframe_4h"]:
+    if timeframe == timeframe_1h:
+        filename = f"{prefix}_3year_{timeframe}.xlsx"
+    elif timeframe == timeframe_4h:
         filename = f"{prefix}_3year_{timeframe}.xlsx"
     else:
         filename = f"{prefix}_3year_daily.xlsx"
@@ -313,21 +322,74 @@ def _merge_incremental_data(existing: pd.DataFrame, incoming: pd.DataFrame) -> p
     return combined.reset_index(drop=True)
 
 
+def _sync_latest_ohlcv_with_retry(
+    project_root: Path,
+    config: dict[str, Any],
+    timeframe: str,
+    exchange_now: pd.Timestamp,
+) -> Path:
+    max_attempts = int(config.get("data", {}).get("validation", {}).get("max_sync_attempts", 3))
+    max_attempts = max(max_attempts, 1)
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            logger.info("sync attempt {}/{} for {}", attempt, max_attempts, timeframe)
+            return sync_latest_ohlcv(project_root, config, timeframe, exchange_now=exchange_now)
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "sync attempt {}/{} failed for {}: {}",
+                attempt,
+                max_attempts,
+                timeframe,
+                exc,
+            )
+            if attempt < max_attempts:
+                time.sleep(0.5)
+
+    raise RuntimeError(f"sync failed for {timeframe} after {max_attempts} attempts: {last_error}")
+
+
 def sync_latest_ohlcv(project_root: Path, config: dict[str, Any], timeframe: str, exchange_now: pd.Timestamp) -> Path:
     path = _resolve_data_file(project_root, config, timeframe)
     existing = _load_table(path)
     exchange = _build_exchange(config)
     symbol = _symbol_to_exchange_symbol(config["basic"]["symbol"])
+    existing_rows = len(existing)
 
-    logger.warning("NOK! sync {} {} -> {}", symbol, timeframe, path.name)
-    incoming = _fetch_incremental_bars(exchange, symbol, timeframe, existing, exchange_now=exchange_now)
-    merged = _merge_incremental_data(existing, incoming)
-    if merged.empty:
-        raise RuntimeError(f"No data available for {symbol} {timeframe}")
+    try:
+        logger.info("start sync {} {} -> {} (existing_rows={})", symbol, timeframe, path.name, existing_rows)
+        incoming = _fetch_incremental_bars(exchange, symbol, timeframe, existing, exchange_now=exchange_now)
+        incoming_rows = len(incoming)
+        merged = _merge_incremental_data(existing, incoming)
+        merged_rows = len(merged)
+        if merged.empty:
+            raise RuntimeError(
+                f"No data available for {symbol} {timeframe}; "
+                f"path={path} existing_rows={existing_rows} incoming_rows={incoming_rows} merged_rows={merged_rows}"
+            )
 
-    _save_table(merged, path)
-    logger.info("saved {} rows to {}", len(merged), path.name)
-    return path
+        _save_table(merged, path)
+        logger.info(
+            "saved {} rows to {} (existing_rows={} incoming_rows={})",
+            merged_rows,
+            path.name,
+            existing_rows,
+            incoming_rows,
+        )
+        return path
+    except Exception as exc:
+        logger.error(
+            "sync failed for {} {} -> {} | existing_rows={} | error_type={} | error={}",
+            symbol,
+            timeframe,
+            path,
+            existing_rows,
+            type(exc).__name__,
+            exc,
+        )
+        raise
 
 
 def _latest_closed_bar_time_from_exchange(
@@ -375,60 +437,110 @@ def _is_local_closed_bar_aligned(
     return True
 
 
-def load_market_data(project_root: Path, config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+def _alignment_failure_reason(
+    project_root: Path,
+    config: dict[str, Any],
+    timeframe: str,
+    exchange_now: pd.Timestamp,
+) -> str:
+    path = _resolve_data_file(project_root, config, timeframe)
+    local_df = _load_table(path)
+    exchange_latest = _latest_closed_bar_time_from_exchange(config, timeframe, exchange_now)
+
+    if local_df.empty:
+        return (
+            f"{timeframe} local file is empty after sync; "
+            f"path={path} exchange_latest={exchange_latest.isoformat()}"
+        )
+
+    local_latest = pd.Timestamp(local_df.iloc[-1]["timestamp"])
+    row_count = len(local_df)
+    delta_seconds = int((exchange_latest - local_latest).total_seconds())
+
+    return (
+        f"{timeframe} local/exchange latest closed bar mismatch after sync; "
+        f"path={path} rows={row_count} "
+        f"local_latest={local_latest.isoformat()} "
+        f"exchange_latest={exchange_latest.isoformat()} "
+        f"delta_seconds={delta_seconds}"
+    )
+
+
+def load_market_data(project_root: Path, config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
+    timeframe_1h = config["basic"]["timeframe_1h"]
     timeframe_4h = config["basic"]["timeframe_4h"]
     timeframe_daily = config["basic"]["timeframe_daily"]
     validation_config = config["data"].get("validation", {})
+    min_rows_1h = int(validation_config.get("min_rows_1h", 200))
     min_rows_4h = int(validation_config.get("min_rows_4h", 200))
     min_rows_1d = int(validation_config.get("min_rows_1d", 60))
 
     exchange_now = fetch_exchange_clock(config)["exchange_now"]
+    bar_1h_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_1h, exchange_now)
     bar_4h_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now)
     bar_1d_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now)
 
-    if not bar_4h_ok or not bar_1d_ok:
+    if not bar_1h_ok or not bar_4h_ok or not bar_1d_ok:
         logger.warning("local xlsx closed bar time is not aligned with exchange, start sync")
-        sync_latest_ohlcv(project_root, config, timeframe_4h, exchange_now=exchange_now)
+        _sync_latest_ohlcv_with_retry(project_root, config, timeframe_1h, exchange_now=exchange_now)
         time.sleep(0.2)
-        sync_latest_ohlcv(project_root, config, timeframe_daily, exchange_now=exchange_now)
+        _sync_latest_ohlcv_with_retry(project_root, config, timeframe_4h, exchange_now=exchange_now)
+        time.sleep(0.2)
+        _sync_latest_ohlcv_with_retry(project_root, config, timeframe_daily, exchange_now=exchange_now)
 
+        if not _is_local_closed_bar_aligned(project_root, config, timeframe_1h, exchange_now):
+            raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_1h, exchange_now))
         if not _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now):
-            raise RuntimeError("NOK! 4h xlsx latest closed bar is still not aligned after sync")
+            raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_4h, exchange_now))
         if not _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now):
-            raise RuntimeError("NOK! 1d xlsx latest closed bar is still not aligned after sync")
+            raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_daily, exchange_now))
 
+    df_1h = _load_table(_resolve_data_file(project_root, config, timeframe_1h))
     df_4h = _load_table(_resolve_data_file(project_root, config, timeframe_4h))
     df_daily = _load_table(_resolve_data_file(project_root, config, timeframe_daily))
 
-    if df_4h.empty or df_daily.empty:
+    if df_1h.empty or df_4h.empty or df_daily.empty:
         raise RuntimeError("NOK! market data files are empty after sync")
 
+    df_1h, report_1h = _validate_market_frame(df_1h, timeframe_1h, min_rows_1h, "1h market data")
     df_4h, report_4h = _validate_market_frame(df_4h, timeframe_4h, min_rows_4h, "4h market data")
     df_daily, report_1d = _validate_market_frame(df_daily, timeframe_daily, min_rows_1d, "1d market data")
 
     logger.info(
-        "market data ready: 4h_rows={} 1d_rows={} 4h_gaps={} 1d_gaps={}",
+        "market data ready: 1h_rows={} 4h_rows={} 1d_rows={} 1h_gaps={} 4h_gaps={} 1d_gaps={}",
+        len(df_1h),
         len(df_4h),
         len(df_daily),
+        report_1h["gap_count"],
         report_4h["gap_count"],
         report_1d["gap_count"],
     )
 
-    latest_bar_time = str(pd.to_datetime(df_4h.iloc[-1]["timestamp"]).isoformat())
-    return df_4h, df_daily, latest_bar_time
+    latest_bar_time = str(pd.to_datetime(df_1h.iloc[-1]["timestamp"]).isoformat())
+    return df_1h, df_4h, df_daily, latest_bar_time
 
 
-def seconds_until_next_4h_bar(now: pd.Timestamp | None = None, offset_seconds: int = 5) -> int:
+def seconds_until_next_timeframe_bar(timeframe: str, now: pd.Timestamp | None = None, offset_seconds: int = 5) -> int:
     current = now or pd.Timestamp.utcnow()
     current = current.tz_localize(None)
-    next_bar_hour = ((current.hour // 4) + 1) * 4
-    next_bar = current.normalize() + pd.Timedelta(hours=next_bar_hour)
-    if next_bar_hour >= 24:
+    if timeframe.endswith("h"):
+        hours = _timeframe_hours(timeframe)
+        next_bar_hour = ((current.hour // hours) + 1) * hours
+        next_bar = current.normalize() + pd.Timedelta(hours=next_bar_hour)
+        if next_bar_hour >= 24:
+            next_bar = current.normalize() + pd.Timedelta(days=1)
+    elif timeframe.endswith("d"):
         next_bar = current.normalize() + pd.Timedelta(days=1)
+    else:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
     wait_seconds = max(int((next_bar - current).total_seconds()) + offset_seconds, offset_seconds)
     return wait_seconds
 
 
-def seconds_until_next_4h_bar_by_exchange(config: dict[str, Any], offset_seconds: int = 5) -> int:
+def seconds_until_next_timeframe_bar_by_exchange(
+    config: dict[str, Any],
+    timeframe: str,
+    offset_seconds: int = 5,
+) -> int:
     clock = fetch_exchange_clock(config)
-    return seconds_until_next_4h_bar(now=clock["exchange_now"], offset_seconds=offset_seconds)
+    return seconds_until_next_timeframe_bar(timeframe, now=clock["exchange_now"], offset_seconds=offset_seconds)

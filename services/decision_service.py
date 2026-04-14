@@ -5,12 +5,13 @@ from typing import Any
 import pandas as pd
 from loguru import logger
 
-from strategy.FourHour_long import Res, eval_exit, testsuite_result
+from strategy.FourHour_short import Res, eval_exit, testsuite_result
 
 
 def make_decision(
     config: dict[str, Any],
     status: dict[str, Any],
+    df_1h: pd.DataFrame,
     df_4h: pd.DataFrame,
     df_daily: pd.DataFrame,
     latest_bar_time: str,
@@ -19,20 +20,16 @@ def make_decision(
     platform = config["basic"]["platform"]
     symbol = config["basic"]["symbol"]
     logger.info("--- Initializing [{}] strategy environment ---", platform)
-    _log_scoring_inputs(df_4h, df_daily, latest_bar_time)
+    _log_scoring_inputs(df_1h, df_4h, df_daily, latest_bar_time)
 
     if status["position_status"] == "flat":
-        last_4h = df_4h.iloc[-1]
-        last_daily = df_daily.iloc[-1]
-        # logger.info("df_4h row data is \n{}", last_4h.to_json(force_ascii=False))
-        # logger.info("df_daily row data is \n{}", last_daily.to_json(force_ascii=False))
         logger.info("Initialization strategy environment! Fetching to {}", symbol)
-        result, score, metrics = testsuite_result(df_4h, df_daily)
-        action = "BUY" if result == Res["OK"] and score >= buypoint else "HOLD"
+        result, score, metrics = testsuite_result(df_1h, df_4h, df_daily)
+        action = "SHORT" if result == Res["OK"] and score >= buypoint else "HOLD"
         metric_text = _normalize_reason(metrics)
         if result == Res["OK"] and score >= buypoint:
             logger.success(
-                "--- OK! score={} >= buypoint={}, Execute purchase points. metrics={} ---",
+                "--- OK! score={} >= buypoint={}, Execute short entry. metrics={} ---",
                 score,
                 buypoint,
                 metric_text,
@@ -61,7 +58,7 @@ def make_decision(
         }
 
     freeze_bars = int(config.get("trade", {}).get("exit_freeze_bars", 0))
-    bars_since_entry = _bars_since_entry(df_4h, status.get("entry_time", ""))
+    bars_since_entry = _bars_since_entry(df_1h, status.get("entry_time", ""))
     if freeze_bars > 0 and bars_since_entry <= freeze_bars:
         logger.warning(
             "--- FREEZE! bars_since_entry={} <= exit_freeze_bars={}, skip exit logic this round ---",
@@ -76,7 +73,7 @@ def make_decision(
             "metrics": [f"freeze_bars={freeze_bars}", f"bars_since_entry={bars_since_entry}"],
         }
 
-    result, exit_signal = eval_exit(df_4h, float(status["entry_price"]))
+    result, exit_signal = eval_exit(df_1h, df_4h, float(status["entry_price"]))
     exit_action = _read_exit_action(exit_signal)
     exit_reason = _read_exit_reason(exit_signal)
     should_exit = result == Res["OK"] and exit_action == "EXIT"
@@ -114,7 +111,7 @@ def _normalize_reason(reason: Any) -> str:
     return str(reason)
 
 
-def _log_scoring_inputs(df_4h: pd.DataFrame, df_daily: pd.DataFrame, latest_bar_time: str) -> None:
+def _log_scoring_inputs(df_1h: pd.DataFrame, df_4h: pd.DataFrame, df_daily: pd.DataFrame, latest_bar_time: str) -> None:
     # logger.debug(
     #     "scoring input summary: latest_4h_bar={} 4h_rows={} daily_rows={} 4h_start={} 4h_end={} daily_start={} daily_end={}",
     #     latest_bar_time,
@@ -125,6 +122,7 @@ def _log_scoring_inputs(df_4h: pd.DataFrame, df_daily: pd.DataFrame, latest_bar_
     #     _safe_timestamp(df_daily, 0),
     #     _safe_timestamp(df_daily, -1),
     # )
+    logger.debug("scoring input 1h tail={}", _tail_records(df_1h, 8))
     logger.debug("scoring input 4h tail={}", _tail_records(df_4h, 6))
     logger.debug("scoring input daily tail={}", _tail_records(df_daily, 6))
 

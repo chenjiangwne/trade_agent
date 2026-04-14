@@ -16,6 +16,7 @@ def load_status(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
             "service_status": "stopped",
             "position_status": "flat",
             "current_phase": "idle",
+            "last_processed_1h_bar_time": "",
             "last_processed_4h_bar_time": "",
             "entry_price": 0.0,
             "entry_time": "",
@@ -25,7 +26,9 @@ def load_status(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
         save_status(project_root, config, default_status)
         return default_status
 
-    return json.loads(path.read_text(encoding="utf-8"))
+    status = json.loads(path.read_text(encoding="utf-8"))
+    status.setdefault("last_processed_1h_bar_time", "")
+    return status
 
 
 def save_status(project_root: Path, config: dict[str, Any], status: dict[str, Any]) -> None:

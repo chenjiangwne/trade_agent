@@ -12,10 +12,10 @@ def execute_order(
     config: dict[str, Any],
     status: dict[str, Any],
     decision: dict[str, Any],
-    df_4h: pd.DataFrame,
+    execution_frame: pd.DataFrame,
 ) -> dict[str, Any]:
-    last_close = float(df_4h.iloc[-1]["close"])
-    last_time = str(pd.to_datetime(df_4h.iloc[-1]["timestamp"]).isoformat())
+    last_close = float(execution_frame.iloc[-1]["close"])
+    last_time = str(pd.to_datetime(execution_frame.iloc[-1]["timestamp"]).isoformat())
 
     updates: dict[str, Any] = {
         "last_action": decision["action"],
@@ -23,10 +23,10 @@ def execute_order(
         "current_phase": "idle",
     }
 
-    if decision["action"] == "BUY":
+    if decision["action"] == "SHORT":
         updates.update(
             {
-                "position_status": "long",
+                "position_status": "short",
                 "entry_price": last_close,
                 "entry_time": last_time,
                 "current_phase": "entry_check",
@@ -47,7 +47,7 @@ def execute_order(
         updates["entry_time"] = status["entry_time"]
 
     if not config["trade"]["paper_trade"]:
-        _log_live_execution_request(config, decision)
+        _log_live_execution_request(config, status, decision)
 
     return {
         "mode": "paper" if config["trade"]["paper_trade"] else "live",
@@ -55,19 +55,22 @@ def execute_order(
     }
 
 
-def _log_live_execution_request(config: dict[str, Any], decision: dict[str, Any]) -> None:
+def _log_live_execution_request(config: dict[str, Any], status: dict[str, Any], decision: dict[str, Any]) -> None:
+    if decision["action"] not in {"SHORT", "EXIT"}:
+        return
+
     api_key = os.getenv("BINANCE_API_KEY", "")
     secret = os.getenv("BINANCE_SECRET_KEY", "")
     if not api_key or not secret:
         logger.warning("live trading requested but BINANCE_API_KEY / BINANCE_SECRET_KEY are not set; skip order placement")
         return
 
-    if decision["action"] not in {"BUY", "EXIT"}:
-        return
-
     symbol = config["basic"]["symbol"]
     exchange_symbol = symbol if "/" in symbol else f"{symbol[:-4]}/{symbol[-4:]}"
-    side = "buy" if decision["action"] == "BUY" else "sell"
+    if decision["action"] == "SHORT":
+        logger.warning("live short entry requested, but exchange client is configured for spot; skip live order placement")
+        return
+    side = "buy" if status.get("position_status") == "short" else "sell"
     amount = float(config["trade"]["quantity"])
 
     exchange = ccxt.binance(

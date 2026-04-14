@@ -1,20 +1,25 @@
 basic:
   platform: binance
   symbol: BTCUSDT
+  timeframe_1h: 1h
   timeframe_4h: 4h
   timeframe_daily: 1d
-  buypoint: 14
+  buypoint: 60
   mode: paper
   max_attempts: 3
+  cooldown_count: 3
 
 data:
   realdata_dir: realdatas
+  kline_1h_file: realdatas/BTC_USDT_3year_1h.xlsx
   kline_4h_file: realdatas/BTC_USDT_3year_4h.xlsx
   kline_1d_file: realdatas/BTC_USDT_3year_daily.xlsx
+  fetch_limit_1h: 1000
   fetch_limit_4h: 500
   fetch_limit_1d: 300
   sync_on_start: true
   validation:
+    min_rows_1h: 200
     min_rows_4h: 200
     min_rows_1d: 60
     max_sync_attempts: 3

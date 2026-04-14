@@ -11,9 +11,29 @@ from loguru import logger
 from app.orchestrator import run_once
 from generic.Common import yml_reader
 from generic.logger import init_report
-from services.market_data_service import seconds_until_next_4h_bar_by_exchange
+from services.market_data_service import seconds_until_next_timeframe_bar_by_exchange
 from services.push_message import push_failure_message
 from services.status_service import load_status
+
+
+def _sleep_with_heartbeat(wait_seconds: int, heartbeat_seconds: int = 900) -> None:
+    remaining = max(int(wait_seconds), 0)
+    if remaining <= 0:
+        return
+
+    heartbeat_seconds = max(int(heartbeat_seconds), 1)
+    started_at = time.time()
+    next_heartbeat_at = started_at + heartbeat_seconds
+
+    while remaining > 0:
+        now = time.time()
+        if now >= next_heartbeat_at and remaining > 0:
+            logger.info("heartbeat: waiting for next run, remaining={} seconds", remaining)
+            next_heartbeat_at += heartbeat_seconds
+
+        sleep_chunk = min(remaining, max(1, int(next_heartbeat_at - now)))
+        time.sleep(sleep_chunk)
+        remaining = max(wait_seconds - int(time.time() - started_at), 0)
 
 
 def main() -> None:
@@ -29,6 +49,7 @@ def main() -> None:
         message = (
             f"startup blocked because status.service_status=error; "
             f"last_action={status.get('last_action')} "
+            f"last_processed_1h_bar_time={status.get('last_processed_1h_bar_time')} "
             f"last_processed_4h_bar_time={status.get('last_processed_4h_bar_time')} "
             f"entry_price={status.get('entry_price')}"
         )
@@ -47,16 +68,21 @@ def main() -> None:
             result = run_once(project_root, config, force_process=(attempt == 1))
             logger.info("loop {} completed: {}", attempt, result)
             if attempt == 1:
-                logger.info("initial run completed; next loop will follow exchange 4h schedule")
+                logger.info("initial run completed; next loop will follow exchange 1h schedule")
                 attempt += 1
                 continue
-            wait_seconds = seconds_until_next_4h_bar_by_exchange(
+            wait_seconds = seconds_until_next_timeframe_bar_by_exchange(
                 config,
+                timeframe=config["basic"]["timeframe_1h"],
                 offset_seconds=config.get("runtime", {}).get("run_delay_seconds", 5),
             )
-            logger.info("sleeping {} seconds until next 4h bar based on exchange clock", wait_seconds)
+            logger.info(
+                "sleeping {} seconds until next {} bar based on exchange clock",
+                wait_seconds,
+                config["basic"]["timeframe_1h"],
+            )
             attempt += 1
-            time.sleep(wait_seconds)
+            _sleep_with_heartbeat(wait_seconds)
     else:
         result = run_once(project_root, config, force_process=True)
         logger.info("trade_agent completed: {}", result)

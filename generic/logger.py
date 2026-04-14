@@ -20,7 +20,7 @@ def init_report(config, attempt, log_name="trade_agent"):
         repo_dir = Path(config["file"]["path"])
         repo_dir.mkdir(parents=True, exist_ok=True)
         current_time = datetime.now()
-        formatted_time = current_time.strftime("%Y-%m-%d")
+        formatted_time = current_time.strftime("%Y-%m-%d_%H-%M-%S")
         log_file = repo_dir / f"{log_name}_{formatted_time}.log"
 
         logger.add(
