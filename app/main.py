@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import sys
 import time
+import traceback
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -12,11 +15,15 @@ from app.orchestrator import run_once
 from generic.Common import yml_reader
 from generic.logger import init_report
 from services.market_data_service import seconds_until_next_timeframe_bar_by_exchange
-from services.push_message import push_failure_message
+from services.push_message import push_failure_message, push_message
 from services.status_service import load_status
 
 
-def _sleep_with_heartbeat(wait_seconds: int, heartbeat_seconds: int = 900) -> None:
+def _sleep_with_heartbeat(
+    config: dict,
+    wait_seconds: int,
+    heartbeat_seconds: int = 1800,
+) -> None:
     remaining = max(int(wait_seconds), 0)
     if remaining <= 0:
         return
@@ -29,6 +36,11 @@ def _sleep_with_heartbeat(wait_seconds: int, heartbeat_seconds: int = 900) -> No
         now = time.time()
         if now >= next_heartbeat_at and remaining > 0:
             logger.info("heartbeat: waiting for next run, remaining={} seconds", remaining)
+            push_message(
+                config,
+                title="trade_agent heartbeat",
+                content=f"waiting for next run\nremaining_seconds={remaining}",
+            )
             next_heartbeat_at += heartbeat_seconds
 
         sleep_chunk = min(remaining, max(1, int(next_heartbeat_at - now)))
@@ -65,7 +77,16 @@ def main() -> None:
         attempt = 1
         while True:
             logger.success("----------starting loop {}---------", attempt)
-            result = run_once(project_root, config, force_process=(attempt == 1))
+            try:
+                result = run_once(project_root, config, force_process=(attempt == 1))
+            except Exception as exc:
+                error_detail = traceback.format_exc()
+                push_failure_message(
+                    config,
+                    title="trade_agent runtime exception",
+                    content=f"{exc}\n\n{error_detail}",
+                )
+                raise
             logger.info("loop {} completed: {}", attempt, result)
             if attempt == 1:
                 logger.info("initial run completed; next loop will follow exchange 1h schedule")
@@ -82,7 +103,7 @@ def main() -> None:
                 config["basic"]["timeframe_1h"],
             )
             attempt += 1
-            _sleep_with_heartbeat(wait_seconds)
+            _sleep_with_heartbeat(config, wait_seconds)
     else:
         result = run_once(project_root, config, force_process=True)
         logger.info("trade_agent completed: {}", result)

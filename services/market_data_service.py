@@ -8,23 +8,50 @@ import ccxt
 import pandas as pd
 from loguru import logger
 
+from generic.network import ccxt_proxy_config, resolve_proxy_url
 
 OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
 
 
-def _proxy_config(config: dict[str, Any]) -> dict[str, Any]:
-    proxy = config.get("network", {}).get("proxy")
-    if not proxy:
-        return {}
-    return {"http": proxy, "https": proxy}
+def _network_retry_config(config: dict[str, Any]) -> tuple[int, float]:
+    validation = config.get("data", {}).get("validation", {})
+    attempts = int(validation.get("max_sync_attempts", 3))
+    delay_seconds = float(config.get("runtime", {}).get("network_retry_delay_seconds", 2))
+    return max(attempts, 1), max(delay_seconds, 0.5)
+
+
+def _call_exchange_with_retry(config: dict[str, Any], label: str, fn):
+    attempts, delay_seconds = _network_retry_config(config)
+    last_error: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            if attempt > 1:
+                logger.warning("retry {}/{} for {}", attempt, attempts, label)
+            return fn()
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "exchange call failed for {} on attempt {}/{}: {}",
+                label,
+                attempt,
+                attempts,
+                exc,
+            )
+            if attempt < attempts:
+                time.sleep(delay_seconds)
+
+    raise RuntimeError(f"{label} failed after {attempts} attempts: {last_error}")
 
 
 def _build_exchange(config: dict[str, Any]) -> ccxt.Exchange:
+    proxy = resolve_proxy_url(config)
+    logger.debug("building binance exchange client with proxy={}", proxy or "DIRECT")
     exchange = ccxt.binance(
         {
             "enableRateLimit": True,
             "timeout": 20000,
-            "proxies": _proxy_config(config),
+            "proxies": ccxt_proxy_config(config),
             "options": {
                 "adjustForTimeDifference": True,
                 "defaultType": "spot",
@@ -36,7 +63,7 @@ def _build_exchange(config: dict[str, Any]) -> ccxt.Exchange:
 
 def fetch_exchange_clock(config: dict[str, Any]) -> dict[str, Any]:
     exchange = _build_exchange(config)
-    exchange_time_ms = exchange.fetch_time()
+    exchange_time_ms = _call_exchange_with_retry(config, "binance fetch_time", exchange.fetch_time)
     if exchange_time_ms is None:
         raise RuntimeError("failed to fetch exchange time")
 
@@ -253,15 +280,87 @@ def _resolve_data_file(project_root: Path, config: dict[str, Any], timeframe: st
     return project_root / data_config["realdata_dir"] / filename
 
 
+def _expected_latest_closed_bar_time(timeframe: str, exchange_now: pd.Timestamp) -> pd.Timestamp:
+    current = pd.Timestamp(exchange_now).tz_localize(None)
+    delta = _expected_delta(timeframe)
+
+    if timeframe.endswith("h"):
+        hours = int(timeframe[:-1])
+        floored_hour = current.floor("h")
+        period_hour = (floored_hour.hour // hours) * hours
+        candidate = floored_hour.normalize() + pd.Timedelta(hours=period_hour)
+    elif timeframe.endswith("d"):
+        candidate = current.normalize()
+    else:
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+    if candidate + delta > current:
+        candidate -= delta
+    return candidate
+
+
+def _latest_local_bar_time(project_root: Path, config: dict[str, Any], timeframe: str) -> pd.Timestamp | None:
+    path = _resolve_data_file(project_root, config, timeframe)
+    local_df = _load_table(path)
+    if local_df.empty:
+        return None
+    return pd.Timestamp(local_df.iloc[-1]["timestamp"])
+
+
+def _validate_or_need_sync(
+    df: pd.DataFrame,
+    timeframe: str,
+    min_rows: int,
+    label: str,
+) -> bool:
+    try:
+        _validate_market_frame(df, timeframe, min_rows, label)
+        return False
+    except Exception as exc:
+        logger.warning("{} validation failed before sync: {}", label, exc)
+        return True
+
+
+def _alignment_failure_reason_from_expected(
+    project_root: Path,
+    config: dict[str, Any],
+    timeframe: str,
+    expected_latest: pd.Timestamp,
+) -> str:
+    path = _resolve_data_file(project_root, config, timeframe)
+    local_df = _load_table(path)
+    if local_df.empty:
+        return (
+            f"{timeframe} local file is empty after sync; "
+            f"path={path} expected_latest={expected_latest.isoformat()}"
+        )
+
+    local_latest = pd.Timestamp(local_df.iloc[-1]["timestamp"])
+    row_count = len(local_df)
+    delta_seconds = int((expected_latest - local_latest).total_seconds())
+    return (
+        f"{timeframe} local latest closed bar mismatch after sync; "
+        f"path={path} rows={row_count} "
+        f"local_latest={local_latest.isoformat()} "
+        f"expected_latest={expected_latest.isoformat()} "
+        f"delta_seconds={delta_seconds}"
+    )
+
+
 def _fetch_closed_bars(
     exchange: ccxt.Exchange,
+    config: dict[str, Any],
     symbol: str,
     timeframe: str,
     exchange_now: pd.Timestamp,
     since: int | None = None,
     limit: int = 1000,
 ) -> pd.DataFrame:
-    raw_bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
+    raw_bars = _call_exchange_with_retry(
+        config,
+        f"binance fetch_ohlcv {symbol} {timeframe}",
+        lambda: exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit),
+    )
     if not raw_bars:
         return pd.DataFrame(columns=OHLCV_COLUMNS)
 
@@ -277,6 +376,7 @@ def _fetch_closed_bars(
 
 def _fetch_incremental_bars(
     exchange: ccxt.Exchange,
+    config: dict[str, Any],
     symbol: str,
     timeframe: str,
     existing: pd.DataFrame,
@@ -284,7 +384,7 @@ def _fetch_incremental_bars(
 ) -> pd.DataFrame:
     if existing.empty:
         logger.info("no local {} data, fetch latest window from exchange", timeframe)
-        return _fetch_closed_bars(exchange, symbol, timeframe, exchange_now=exchange_now, since=None, limit=1000)
+        return _fetch_closed_bars(exchange, config, symbol, timeframe, exchange_now=exchange_now, since=None, limit=1000)
 
     step_ms = _timeframe_milliseconds(timeframe)
     since = _last_gap_repair_since(existing, timeframe)
@@ -292,7 +392,7 @@ def _fetch_incremental_bars(
     batches: list[pd.DataFrame] = []
 
     for _ in range(20):
-        batch = _fetch_closed_bars(exchange, symbol, timeframe, exchange_now=exchange_now, since=since, limit=1000)
+        batch = _fetch_closed_bars(exchange, config, symbol, timeframe, exchange_now=exchange_now, since=since, limit=1000)
         if batch.empty:
             break
 
@@ -360,7 +460,7 @@ def sync_latest_ohlcv(project_root: Path, config: dict[str, Any], timeframe: str
 
     try:
         logger.info("start sync {} {} -> {} (existing_rows={})", symbol, timeframe, path.name, existing_rows)
-        incoming = _fetch_incremental_bars(exchange, symbol, timeframe, existing, exchange_now=exchange_now)
+        incoming = _fetch_incremental_bars(exchange, config, symbol, timeframe, existing, exchange_now=exchange_now)
         incoming_rows = len(incoming)
         merged = _merge_incremental_data(existing, incoming)
         merged_rows = len(merged)
@@ -399,7 +499,7 @@ def _latest_closed_bar_time_from_exchange(
 ) -> pd.Timestamp:
     exchange = _build_exchange(config)
     symbol = _symbol_to_exchange_symbol(config["basic"]["symbol"])
-    bars = _fetch_closed_bars(exchange, symbol, timeframe, exchange_now=exchange_now, since=None, limit=10)
+    bars = _fetch_closed_bars(exchange, config, symbol, timeframe, exchange_now=exchange_now, since=None, limit=10)
     if bars.empty:
         raise RuntimeError(f"NOK! exchange has no closed {timeframe} bar for {symbol}")
     return pd.Timestamp(bars.iloc[-1]["timestamp"])
@@ -476,28 +576,72 @@ def load_market_data(project_root: Path, config: dict[str, Any]) -> tuple[pd.Dat
     min_rows_1d = int(validation_config.get("min_rows_1d", 60))
 
     exchange_now = fetch_exchange_clock(config)["exchange_now"]
-    bar_1h_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_1h, exchange_now)
-    bar_4h_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now)
-    bar_1d_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now)
-
-    if not bar_1h_ok or not bar_4h_ok or not bar_1d_ok:
-        logger.warning("local xlsx closed bar time is not aligned with exchange, start sync")
-        _sync_latest_ohlcv_with_retry(project_root, config, timeframe_1h, exchange_now=exchange_now)
-        time.sleep(0.2)
-        _sync_latest_ohlcv_with_retry(project_root, config, timeframe_4h, exchange_now=exchange_now)
-        time.sleep(0.2)
-        _sync_latest_ohlcv_with_retry(project_root, config, timeframe_daily, exchange_now=exchange_now)
-
-        if not _is_local_closed_bar_aligned(project_root, config, timeframe_1h, exchange_now):
-            raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_1h, exchange_now))
-        if not _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now):
-            raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_4h, exchange_now))
-        if not _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now):
-            raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_daily, exchange_now))
+    expected_latest_by_timeframe = {
+        timeframe_1h: _expected_latest_closed_bar_time(timeframe_1h, exchange_now),
+        timeframe_4h: _expected_latest_closed_bar_time(timeframe_4h, exchange_now),
+        timeframe_daily: _expected_latest_closed_bar_time(timeframe_daily, exchange_now),
+    }
 
     df_1h = _load_table(_resolve_data_file(project_root, config, timeframe_1h))
     df_4h = _load_table(_resolve_data_file(project_root, config, timeframe_4h))
     df_daily = _load_table(_resolve_data_file(project_root, config, timeframe_daily))
+
+    frames = {
+        timeframe_1h: (df_1h, min_rows_1h, "1h market data"),
+        timeframe_4h: (df_4h, min_rows_4h, "4h market data"),
+        timeframe_daily: (df_daily, min_rows_1d, "1d market data"),
+    }
+
+    sync_timeframes: list[str] = []
+    for timeframe, (frame, min_rows, label) in frames.items():
+        local_latest = _latest_local_bar_time(project_root, config, timeframe)
+        expected_latest = expected_latest_by_timeframe[timeframe]
+        latest_mismatch = local_latest != expected_latest
+        validation_failed = _validate_or_need_sync(frame, timeframe, min_rows, label)
+
+        if latest_mismatch:
+            logger.warning(
+                "{} local latest closed bar not ready: local_latest={} expected_latest={}",
+                timeframe,
+                local_latest.isoformat() if local_latest is not None else None,
+                expected_latest.isoformat(),
+            )
+
+        if timeframe == timeframe_1h or latest_mismatch or validation_failed:
+            if latest_mismatch or validation_failed:
+                sync_timeframes.append(timeframe)
+            else:
+                logger.info(
+                    "{} local data ready, skip sync: local_latest={} expected_latest={}",
+                    timeframe,
+                    local_latest.isoformat() if local_latest is not None else None,
+                    expected_latest.isoformat(),
+                )
+        else:
+            logger.info(
+                "{} is not due and validation passed, skip sync: local_latest={} expected_latest={}",
+                timeframe,
+                local_latest.isoformat() if local_latest is not None else None,
+                expected_latest.isoformat(),
+            )
+
+    for index, timeframe in enumerate(sync_timeframes):
+        _sync_latest_ohlcv_with_retry(project_root, config, timeframe, exchange_now=exchange_now)
+        if index < len(sync_timeframes) - 1:
+            time.sleep(0.2)
+
+    if sync_timeframes:
+        df_1h = _load_table(_resolve_data_file(project_root, config, timeframe_1h))
+        df_4h = _load_table(_resolve_data_file(project_root, config, timeframe_4h))
+        df_daily = _load_table(_resolve_data_file(project_root, config, timeframe_daily))
+
+        for timeframe in sync_timeframes:
+            local_latest = _latest_local_bar_time(project_root, config, timeframe)
+            expected_latest = expected_latest_by_timeframe[timeframe]
+            if local_latest != expected_latest:
+                raise RuntimeError(
+                    _alignment_failure_reason_from_expected(project_root, config, timeframe, expected_latest)
+                )
 
     if df_1h.empty or df_4h.empty or df_daily.empty:
         raise RuntimeError("NOK! market data files are empty after sync")

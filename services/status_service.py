@@ -22,12 +22,15 @@ def load_status(project_root: Path, config: dict[str, Any]) -> dict[str, Any]:
             "entry_time": "",
             "last_action": "SKIP",
             "last_score": 0.0,
+            "cooldown_count": 0,
         }
         save_status(project_root, config, default_status)
         return default_status
 
     status = json.loads(path.read_text(encoding="utf-8"))
     status.setdefault("last_processed_1h_bar_time", "")
+    status.setdefault("last_processed_4h_bar_time", "")
+    status.setdefault("cooldown_count", 0)
     return status
 
 

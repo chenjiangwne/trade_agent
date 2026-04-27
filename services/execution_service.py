@@ -7,6 +7,8 @@ import ccxt
 import pandas as pd
 from loguru import logger
 
+from generic.network import ccxt_proxy_config, resolve_proxy_url
+
 
 def execute_order(
     config: dict[str, Any],
@@ -23,10 +25,11 @@ def execute_order(
         "current_phase": "idle",
     }
 
-    if decision["action"] == "SHORT":
+    if decision["action"] in {"SHORT", "LONG"}:
+        position_status = "short" if decision["action"] == "SHORT" else "long"
         updates.update(
             {
-                "position_status": "short",
+                "position_status": position_status,
                 "entry_price": last_close,
                 "entry_time": last_time,
                 "current_phase": "entry_check",
@@ -56,7 +59,7 @@ def execute_order(
 
 
 def _log_live_execution_request(config: dict[str, Any], status: dict[str, Any], decision: dict[str, Any]) -> None:
-    if decision["action"] not in {"SHORT", "EXIT"}:
+    if decision["action"] not in {"LONG", "SHORT", "EXIT"}:
         return
 
     api_key = os.getenv("BINANCE_API_KEY", "")
@@ -70,17 +73,28 @@ def _log_live_execution_request(config: dict[str, Any], status: dict[str, Any], 
     if decision["action"] == "SHORT":
         logger.warning("live short entry requested, but exchange client is configured for spot; skip live order placement")
         return
-    side = "buy" if status.get("position_status") == "short" else "sell"
+    if decision["action"] == "LONG":
+        side = "buy"
+    else:
+        side = "buy" if status.get("position_status") == "short" else "sell"
     amount = float(config["trade"]["quantity"])
+    proxy = resolve_proxy_url(config)
 
     exchange = ccxt.binance(
         {
             "apiKey": api_key,
             "secret": secret,
             "enableRateLimit": True,
+            "proxies": ccxt_proxy_config(config),
             "options": {"adjustForTimeDifference": True},
         }
     )
-    logger.warning("placing live {} market order: {} {}", side, exchange_symbol, amount)
+    logger.warning(
+        "placing live {} market order: {} {} proxy={}",
+        side,
+        exchange_symbol,
+        amount,
+        proxy or "DIRECT",
+    )
     order = exchange.create_order(exchange_symbol, "market", side, amount)
     logger.info("live order response: {}", order.get("id", "unknown"))

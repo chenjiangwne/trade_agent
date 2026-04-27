@@ -1,307 +1,142 @@
 # trade_agent
 
-基于 4H K 线的交易代理项目。当前版本已经接通 Binance 行情同步、数据校验与自动修复、4H 定时调度、状态持久化、失败通知 mock 和文件日志。
+BTC/USDT 策略运行与回测项目。当前主程序用于实盘/模拟盘轮询，回测用于生成 `backtest_result_with_signals.xlsx` 和交互式 HTML 报告。
 
-## 会话记录
+## 当前策略语义
 
-- 对话 ID: `codex resume 019d8be4-1639-7940-951f-4bb2fd0dfb70`
+- 当前配置默认走做空：`strategy.short: true`，`strategy.long: false`。
+- `main` 每 1h 唤醒一次，用于同步和校验数据。
+- 做空策略只在新 4h K 线出现时触发决策，使用 `last_processed_4h_bar_time` 防止重复处理。
+- 1h 数据是做空策略的辅助输入，不是独立入场触发器。
+- 如果 4h 条件不满足，1h 信号再好也不会单独开仓。
+- 做空回测和 main 共用 `services.short_4h_service.make_short_4h_decision(...)`。
 
-## 当前能力
+## 数据文件
 
-- 读取本地 `realdatas/` 历史数据
-- 每次打分前自动校验数据正确性和连续性
-- 校验失败时自动从 Binance 同步并重试，最多 3 次
-- 3 次仍失败时走 `push_message` mock 告警
-- 以 Binance 交易所时间为准调度下一次 4H 执行
-- 要求交易所时间与本机时间偏差不超过 60 秒
-- 打分后把总分 `score` 和 `metrics` 打到日志
-- 使用 `status.json` 维护服务状态和仓位状态
-- 支持 `paper_trade` 和 `live` 模式
+默认读取本地数据：
 
-## 目录结构
-
-- `app/main.py`
-  程序入口。负责读取配置、初始化日志并进入循环调度。
-
-- `app/orchestrator.py`
-  主流程调度器。负责串联市场数据、决策、执行和状态回写。
-
-- `services/market_data_service.py`
-  市场数据服务。负责：
-  - 读取本地数据文件
-  - 从 Binance 增量同步数据
-  - 自动修复尾部缺口
-  - 校验 OHLCV、排序、重复、连续性和最小 K 线数量
-  - 获取交易所时间并校验本地时间偏差
-
-- `services/decision_service.py`
-  负责把策略结果标准化为：
-  - `action`
-  - `score`
-  - `metrics`
-
-- `services/execution_service.py`
-  执行层。
-  - `paper_trade: true` 时只模拟执行
-  - `paper_trade: false` 时尝试按 Binance API 下单
-
-- `services/status_service.py`
-  管理 `config/status.json` 的读写。
-
-- `services/push_message.py`
-  失败通知服务，当前为 mock 版本。
-
-- `strategy/FourHour_long.py`
-  4H Long 策略逻辑。
-
-- `generic/logger.py`
-  日志初始化模块。
-
-- `config/config.yaml`
-  主配置文件。
-
-- `config/status.json`
-  运行状态文件。
-
-- `realdatas/`
-  本地历史数据文件目录。
-
-- `reports/`
-  日志目录。
-
-## 数据源与数据文件
-
-默认数据文件：
-
+- `realdatas/BTC_USDT_3year_1h.xlsx`
 - `realdatas/BTC_USDT_3year_4h.xlsx`
 - `realdatas/BTC_USDT_3year_daily.xlsx`
 
-如果切换标的，需要同步修改：
+数据同步失败会重试，失败原因会写入日志并推送异常消息。
 
-- `basic.symbol`
-- `data.kline_4h_file`
-- `data.kline_1d_file`
+## 关键配置
 
-## 打分前的数据校验
-
-每次进入策略打分前，系统都会先校验数据，不满足条件不会直接进入评分。
-
-校验项包括：
-
-- 是否包含 `timestamp/open/high/low/close/volume`
-- 时间戳是否可解析
-- 时间是否升序
-- 是否有重复时间戳
-- OHLC 是否合理
-- 时间序列是否连续
-- 最新连续区间是否满足最少 K 线数量
-
-默认最少数量：
-
-- `4h`: 200 根
-- `1d`: 60 根
-
-## 数据异常时的处理流程
-
-如果本地数据校验失败：
-
-1. 自动从 Binance 同步最新数据
-2. 重新校验
-3. 最多重试 3 次
-4. 如果仍失败：
-   - 记录 error 日志
-   - 通过 `services/push_message.py` 发送 mock 失败通知
-   - 本轮停止，不进入打分
-
-## 交易所时间规则
-
-4H 任务不是按本机时间触发，而是按 Binance 时间触发。
-
-当前规则：
-
-- 每轮运行前先获取 Binance 时间
-- 校验本机和交易所时间偏差
-- 偏差必须小于等于 60 秒
-- 超过 60 秒，本轮视为异常并终止
-- 下一次 4H bar 的等待时间按交易所时间计算
-
-相关配置：
+配置文件：`config/config.yaml`
 
 ```yaml
-runtime:
-  run_forever: true
-  run_delay_seconds: 5
-  max_clock_diff_seconds: 60
+strategy:
+  short: true
+  long: false
+  short_config:
+    buypoint: 30
+  long_config:
+    buypoint: 60
+
+backtest:
+  active_side: short
+  short:
+    buypoint: 30
+    cooldown_count: 1
+    eval_exit:
+      enabled: true
+  long:
+    buypoint: 60
+    cooldown_count: 3
+    eval_exit:
+      enabled: true
 ```
 
-## 评分日志
+说明：
 
-每次打分或决策后，日志都会打印：
+- `backtest.short.cooldown_count` 是做空触发后的冻结 K 线数量配置。
+- `status.cooldown_count` 是运行时剩余冻结 K 线数量，用于 main 重启后保持状态。
+- `notify.channel: wecom` 时通过企业微信机器人推送信号、异常和心跳。
 
-- `decision`
-- `score`
-- `metrics`
+## main 运行逻辑
 
-示例：
-
-```text
-decision=BUY score=9.0 metrics=daily_above_ema200 | daily_ema200_rising | 4h_ema50_above_ema200
-```
-
-## 配置说明
-
-### `basic`
-
-- `platform`
-  当前为 `binance`
-
-- `symbol`
-  当前为 `BTCUSDT`
-
-- `timeframe_4h`
-  当前为 `4h`
-
-- `timeframe_daily`
-  当前为 `1d`
-
-- `buypoint`
-  入场阈值
-
-### `data`
-
-- `realdata_dir`
-  本地数据目录
-
-- `kline_4h_file`
-  4H 数据文件路径
-
-- `kline_1d_file`
-  1D 数据文件路径
-
-- `sync_on_start`
-  每轮开始前是否先同步交易所数据
-
-- `validation.min_rows_4h`
-  4H 最少连续 K 线数量
-
-- `validation.min_rows_1d`
-  1D 最少连续 K 线数量
-
-- `validation.max_sync_attempts`
-  校验失败后的最大同步尝试次数
-
-### `trade`
-
-- `paper_trade`
-  - `true`：模拟执行
-  - `false`：真实下单
-
-- `quantity`
-  下单数量
-
-- `exit_freeze_bars`
-  持仓后冻结的 4H K 线数量。
-  在冻结期内不会执行 exit 逻辑，系统会直接返回 `HOLD`。
-  当前默认值为 `3`。
-
-### `network`
-
-- `proxy`
-  当前配置：
-  `http://127.0.0.1:7897`
-
-### `notify`
-
-- `channel`
-  当前为 `mock`
-
-### `logging`
-
-- `console.enabled`
-  是否输出控制台日志
-
-- `file.enabled`
-  是否写入文件日志
-
-- `file.path`
-  当前为 `reports/`
-
-## 运行方式
-
-在项目根目录执行：
-
-```bash
-python app/main.py
-```
-
-默认流程：
-
-1. 初始化日志
-2. 启动先读取 `status.json`
-3. 如果 `service_status == error`：
-   - 直接记录 error 日志
-   - 发送 `push_message` mock
-   - 结束程序
-4. 如果 `service_status != error`：
-   - 第 1 轮强制走一次完整流程，不因为 `last_processed_4h_bar_time` 而跳过
-   - 用于验证当前打分链路和状态写入是否正常
-5. 从第 2 轮开始，再按交易所时间等待下一个 4H bar
-
-## 实盘模式
-
-如果要启用真实下单，需要先设置环境变量：
+入口：
 
 ```powershell
-$env:BINANCE_API_KEY="your_api_key"
-$env:BINANCE_SECRET_KEY="your_secret_key"
+python app\main.py
 ```
 
-并确保：
+主流程：
 
-- `trade.paper_trade: false`
-- 代理可用
-- 本机时间和交易所时间偏差在允许范围内
-- Binance API 权限正确
+1. 读取 `config/config.yaml` 和 `config/status.json`。
+2. 同步并校验 1h、4h、daily 数据。
+3. 每 1h 唤醒一次。
+4. 如果当前没有新的 4h K 线，short 策略跳过。
+5. 如果出现新的 4h K 线，调用做空决策。
+6. 命中入场或出场信号时推送企业微信消息，并写入 `reports/trade_signals.csv`。
+7. 每 30 分钟输出一次 heartbeat 日志并推送心跳消息。
 
-如果未设置密钥，程序会记录 warning，但不会真实下单。
+## 做空回测
 
-## 日志
+运行：
 
-日志输出到：
+```powershell
+python backtest\backtest.py
+python backtest\generate_short_html.py
+```
 
-- `reports/trade_agent_YYYY-MM-DD.log`
+输出：
 
-日志内容包括：
+- `backtest_result_with_signals.xlsx`
+- `strategy_backtest_dashboard.html`
 
-- 行情同步
-- 数据校验
-- 时钟校验
-- 策略决策
-- 总分与 metrics
-- 执行结果
-- 失败通知
+当前做空回测结果：
 
-## 当前已实现的失败通知
+- 总交易次数：88
+- 胜率：47.73%
+- 累计净收益率：+61.17%
+- 总绝对利润：56966.09
+- 盈亏比：2.03
+- 最大回撤：-34.54%
 
-`services/push_message.py` 当前还是 mock 实现。
+注意：回测外层直接按 4h K 线循环；main 外层按 1h 唤醒，但只有新 4h K 线才真正执行 short 决策。对当前 4h 做空策略来说，实际决策点一致。
 
-失败时会：
+## 重要文件
 
-- 把 title / content 打到日志
-- 返回 `status=mock_sent`
+- `app/main.py`：程序入口，负责循环调度和 heartbeat。
+- `app/orchestrator.py`：加载数据、调用决策、执行订单、推送信号、写 CSV。
+- `services/short_4h_service.py`：做空 4h 决策服务，main 和 backtest 共用。
+- `services/decision_service.py`：原通用决策服务，主要用于非 short 路径。
+- `services/execution_service.py`：模拟/实盘执行层。
+- `services/market_data_service.py`：本地数据读取、同步、校验。
+- `services/push_message.py`：企业微信/日志通知。
+- `services/status_service.py`：读写 `config/status.json`。
+- `strategy/FourHour_short.py`：做空策略核心。
+- `backtest/backtest.py`：做空回测入口。
+- `backtest/generate_short_html.py`：生成做空回测 HTML。
 
-后续可以扩展成飞书、企业微信或 Telegram。
+## 日志和信号记录
+
+- 每次运行会在 `reports/` 下生成独立日志文件。
+- 入场/出场信号会写入 `reports/trade_signals.csv`。
+- 企业微信推送包括入场价格、出场价格、当前收盘价、信号时间、score 和 reason。
+
+## 代理和网络
+
+`config.yaml` 中：
+
+```yaml
+network:
+  proxy: ""
+```
+
+如果本机直连 Binance 不通，可以改成代理地址，例如：
+
+```yaml
+network:
+  proxy: "http://127.0.0.1:7897"
+```
+
+也可以使用项目根目录下的 bat 文件按直连或代理方式运行。
 
 ## 已知限制
 
-- 当前数据文件仍是本地 `.xlsx`
-- 如果手动打开 `.xlsx`，Windows 可能锁文件，影响同步写回
-- `push_message` 目前不是正式通知通道
-- 执行层目前是基础 market order 模型，没有补完整的风控和成交确认
-
-## 后续建议
-
-- 把 `push_message` 接成正式通知通道
-- 给 live 下单补成交确认和异常回滚
-- 增加 15m 执行层过滤
-- 增加 Docker / 守护进程部署方式
+- 当前做空实盘入口只推送信号；spot 环境不会真正开空单。
+- 数据仍使用本地 `.xlsx` 文件，手动打开 Excel 可能导致写入失败。
+- 如果要让 1h 独立触发提前入场，需要新增策略规则，否则会和当前 88 次回测不一致。

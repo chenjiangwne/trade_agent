@@ -4,10 +4,18 @@ basic:
   timeframe_1h: 1h
   timeframe_4h: 4h
   timeframe_daily: 1d
-  buypoint: 60
+  buypoint: 30
   mode: paper
   max_attempts: 3
-  cooldown_count: 3
+  cooldown_count: 1
+
+strategy:
+  short: true
+  long: false
+  short_config:
+    buypoint: 30
+  long_config:
+    buypoint: 60
 
 data:
   realdata_dir: realdatas
@@ -33,10 +41,11 @@ trade:
   exit_freeze_bars: 3
 
 network:
-  proxy: "http://127.0.0.1:7897"
+  proxy: ""
 
 notify:
-  channel: mock
+  channel: wecom
+  webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=92c5f010-1722-4528-b911-b72ca8403cc3"
 
 runtime:
   run_forever: true
@@ -44,12 +53,25 @@ runtime:
   max_clock_diff_seconds: 60
 
 backtest:
-  eval_exit:
-    enabled: true
-  eval_execution_15m:
-    enabled: false
-  back_test:
-    enabled: true
+  active_side: short
+  short:
+    buypoint: 30
+    cooldown_count: 1
+    eval_exit:
+      enabled: true
+    eval_execution_15m:
+      enabled: false
+    back_test:
+      enabled: true
+  long:
+    buypoint: 60
+    cooldown_count: 3
+    eval_exit:
+      enabled: true
+    eval_execution_15m:
+      enabled: false
+    back_test:
+      enabled: true
 
 logging:
   console:

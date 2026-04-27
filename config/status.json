@@ -2,10 +2,11 @@
   "service_status": "running",
   "position_status": "flat",
   "current_phase": "idle",
-  "last_processed_4h_bar_time": "2026-04-14T08:00:00",
+  "last_processed_4h_bar_time": "2026-04-27T08:00:00",
   "entry_price": 0.0,
   "entry_time": "",
   "last_action": "SKIP",
-  "last_score": 54.0,
-  "last_processed_1h_bar_time": "2026-04-14T14:00:00"
+  "last_score": 0.0,
+  "last_processed_1h_bar_time": "2026-04-27T11:00:00",
+  "cooldown_count": 0
 }
