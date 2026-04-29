@@ -55,6 +55,8 @@ def backtest():
         logger.debug(config)
         step = 1 
         cooldown_count = 0
+        entry_price = None
+        entry_index = None
         for i in range(1498, len(df_4h), step):
             try:
                 #冻结周期
@@ -80,50 +82,43 @@ def backtest():
                 else:
                     logger.warning(f"---Index:{i+1} | Score:{total_scores} | {metrics}  ---")
                 if total_scores >= buypoint:
-                    state=Res['position']
-                    # 
-                    df_4h.at[df_4h.index[i], 'buy_signal'] = df_4h.iloc[i]['close']
-                    logger.success(f"---✅ Index:{i+1} | Score:{total_scores} | BUY Signal Recorded |Start Buy lock up  ---")
-                    cooldown_count=config['basic']['cooldown_count']
-                    # if config['backtest']["eval_execution_15m"]["enabled"] ==True:
-                    #     current_15m_exec = df_15m[
-                    #         (df_15m['timestamp'] <= current_date + pd.Timedelta(minutes=15))
-                    #     ].copy()
-                    #     logger.debug(f"df_15m is:\n{current_15m_exec}")
-                    #     if not current_15m_exec.empty:
-                    #         exec_price = current_15m_exec.iloc[-1]['close']
-                    #         logger.debug(f"4H close time: {current_date} | Observation 15m Execution Window: {current_15m_exec.iloc[-1]['timestamp']}")
-                    #         result, action = eval_execution_15m(current_15m_exec)
-                    #         if action.StrategyResult.value=='LONG':
-                    #             # df_4h.at[df_4h.index[i], 'buy_signal'] = df_4h.iloc[i]['close']
-                    #             # logger.success(f"---✅ Index:{i+1} | Score:{total_scores} | BUY Signal Recorded |Start Buy lock up  ---")
-                    #             # cooldown_count=config['basic']['cooldown_count']
-                    #             logger.success(f"---✅ Index:{i+1} | 15m action result:{action}  | LONG Signal Recorded ---")
-                    #         else:
-                    #             logger.error(f"NOK! action:{action} result incorrect!")
-                    
-                    continue 
-                if config['backtest']["eval_exit"]["enabled"] ==True:
-                    if state == Res['position']:
+                    state = Res['position']
+                    entry_price = df_4h.iloc[i]['close']
+                    entry_index = i
 
-                        if i + 1 < len(df_4h):
-                            current_context = df_4h.iloc[:i+2].copy() 
-                            current_context_1h = df_1h[df_1h['timestamp'] <= current_context.iloc[-1]['timestamp']].copy()
-                            buy_price = df_4h.iloc[i]['close'] 
-                            #exit
-                            re, signal = eval_exit(current_context_1h, current_context, entry_price=buy_price)
-                            logger.debug(f'signal.StrategyResult:{signal}')
-                            if re == Res['OK'] :
-                                if signal.StrategyResult.value == 'EXIT':
-                                    df_4h.at[df_4h.index[i+1], 'sell_signal'] = df_4h.iloc[i+1]['close']
-                                    state = Res['empty'] 
-                                    logger.success(f"---✅ Index:{i+1} | Exit Triggered: {signal.metric} ---")
-                                else:
-                                    pass
-                            else:
-                                logger.error(f"---NOK! Attempt>>{i}<<success,The Exit case failed to occur,Please check log---")
-                                break
-                    
+                    df_4h.at[df_4h.index[i], 'buy_signal'] = entry_price
+                    logger.success(
+                        f"---✅ Index:{i+1} | Score:{total_scores} | BUY Signal Recorded "
+                        f"| entry_time={df_4h.iloc[i]['timestamp']} | entry_price={entry_price} ---"
+                    )
+                    cooldown_count = config['basic']['cooldown_count']
+                    continue
+                if config['backtest']["eval_exit"]["enabled"] == True:
+                    if state == Res['position'] and entry_price is not None:
+
+                        # 退出判断只能用当前已收盘的数据，不能偷看下一根
+                        current_context = df_4h.iloc[:i+1].copy()
+                        current_context_1h = df_1h[df_1h['timestamp'] <= current_context.iloc[-1]['timestamp']].copy()
+
+                        re, signal = eval_exit(current_context_1h, current_context, entry_price=entry_price)
+                        logger.debug(f'signal.StrategyResult:{signal}')
+
+                        if re == Res['OK']:
+                            if signal.StrategyResult.value == 'EXIT':
+                                exit_price = df_4h.iloc[i]['close']
+                                df_4h.at[df_4h.index[i], 'sell_signal'] = exit_price
+
+                                logger.success(
+                                    f"---✅ Index:{i+1} | Exit Triggered: {signal.metric} "
+                                    f"| exit_time={df_4h.iloc[i]['timestamp']} | exit_price={exit_price} ---"
+                                )
+
+                                state = Res['empty']
+                                entry_price = None
+                                entry_index = None
+                        else:
+                            logger.error(f"---NOK! Attempt>>{i}<<success,The Exit case failed to occur,Please check log---")
+                            break   
             except Exception as e:
                 logger.error(f"Error at index {i+1}: {e}")
                 # get_traceback()
