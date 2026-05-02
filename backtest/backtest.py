@@ -50,6 +50,7 @@ def backtest():
 
         config = yml_reader(str(project_root / "config" / "config.yaml"))
         buypoint = config['basic']['buypoint']
+        buypoint_step = int(config.get("basic", {}).get("buypoint_step", 3))
         init_report(config["logging"], attempt=1, log_name="backtest")
         logger.info("backtest starting")
         logger.debug(config)
@@ -57,6 +58,7 @@ def backtest():
         cooldown_count = 0
         entry_price = None
         entry_index = None
+        last_entry_score = None
         for i in range(1498, len(df_4h), step):
             try:
                 #冻结周期
@@ -81,10 +83,15 @@ def backtest():
                     break
                 else:
                     logger.warning(f"---Index:{i+1} | Score:{total_scores} | {metrics}  ---")
-                if total_scores >= buypoint:
+                required_entry_score = buypoint
+                if state == Res['position'] and last_entry_score is not None:
+                    required_entry_score = float(last_entry_score) + float(buypoint_step)
+
+                if total_scores >= required_entry_score:
                     state = Res['position']
                     entry_price = df_4h.iloc[i]['close']
                     entry_index = i
+                    last_entry_score = float(total_scores)
 
                     df_4h.at[df_4h.index[i], 'buy_signal'] = entry_price
                     logger.success(
@@ -116,6 +123,7 @@ def backtest():
                                 state = Res['empty']
                                 entry_price = None
                                 entry_index = None
+                                last_entry_score = None
                         else:
                             logger.error(f"---NOK! Attempt>>{i}<<success,The Exit case failed to occur,Please check log---")
                             break   

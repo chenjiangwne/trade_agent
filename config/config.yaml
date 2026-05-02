@@ -4,10 +4,11 @@ basic:
   timeframe_1h: 1h
   timeframe_4h: 4h
   timeframe_daily: 1d
-  buypoint: 30
+  buypoint: 39
+  buypoint_step: 3
   mode: paper
   max_attempts: 3
-  cooldown_count: 1
+  cooldown_count: 0
 
 data:
   realdata_dir: realdatas
@@ -36,7 +37,8 @@ network:
   proxy: "http://127.0.0.1:7897"
 
 notify:
-  channel: mock
+  channel: wecom
+  webhook: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=92c5f010-1722-4528-b911-b72ca8403cc3"
 
 runtime:
   run_forever: true
@@ -53,7 +55,7 @@ backtest:
 
 logging:
   console:
-    enabled: false
+    enabled: true
     level: DEBUG
     format: "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>"
   file:

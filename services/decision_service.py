@@ -17,6 +17,7 @@ def make_decision(
     latest_bar_time: str,
 ) -> dict[str, Any]:
     buypoint = config["basic"]["buypoint"]
+    buypoint_step = float(config.get("basic", {}).get("buypoint_step", 3))
     platform = config["basic"]["platform"]
     symbol = config["basic"]["symbol"]
     logger.info("--- Initializing [{}] strategy environment ---", platform)
@@ -52,10 +53,35 @@ def make_decision(
         return {
             "action": action,
             "score": float(score),
+            "entry_score": float(score),
             "bar_time": latest_bar_time,
             "reason": metric_text,
             "metrics": metrics if isinstance(metrics, list) else [metric_text],
         }
+
+    # 持仓中允许加仓：每次加仓分数门槛 = 上次开仓分数 + buypoint_step
+    result, score, metrics = testsuite_result(df_1h, df_4h, df_daily)
+    metric_text = _normalize_reason(metrics)
+    if result == Res["OK"]:
+        last_entry_score = float(status.get("last_entry_score", status.get("last_score", buypoint)))
+        required_add_score = last_entry_score + buypoint_step
+        if float(score) >= required_add_score:
+            logger.success(
+                "--- OK! add short enabled: score={} >= required_add_score={} (last_entry_score={} + step={}). metrics={} ---",
+                score,
+                required_add_score,
+                last_entry_score,
+                buypoint_step,
+                metric_text,
+            )
+            return {
+                "action": "SHORT",
+                "score": float(score),
+                "entry_score": float(score),
+                "bar_time": latest_bar_time,
+                "reason": metric_text,
+                "metrics": metrics if isinstance(metrics, list) else [metric_text],
+            }
 
     freeze_bars = int(config.get("trade", {}).get("exit_freeze_bars", 0))
     bars_since_entry = _bars_since_entry(df_1h, status.get("entry_time", ""))

@@ -25,6 +25,35 @@ def _safe_metric(report: dict, *keys, default=0):
     return default
 
 
+def _add_trade_interval_shapes(fig, trades_df: pd.DataFrame) -> None:
+    if trades_df is None or trades_df.empty:
+        return
+
+    frame = trades_df.copy()
+    frame["entry_time"] = pd.to_datetime(frame["entry_time"], errors="coerce")
+    frame["exit_time"] = pd.to_datetime(frame["exit_time"], errors="coerce")
+    frame["net_return"] = pd.to_numeric(frame["net_return"], errors="coerce")
+    frame = frame.dropna(subset=["entry_time", "exit_time", "net_return"])
+    if frame.empty:
+        return
+
+    for _, row in frame.iterrows():
+        is_win = float(row["net_return"]) > 0
+        fill = "rgba(14, 203, 129, 0.10)" if is_win else "rgba(246, 70, 93, 0.12)"
+        fig.add_shape(
+            type="rect",
+            x0=row["entry_time"],
+            x1=row["exit_time"],
+            y0=0,
+            y1=1,
+            xref="x",
+            yref="paper",
+            fillcolor=fill,
+            line=dict(width=0),
+            layer="below",
+        )
+
+
 def generate_interactive_html_with_dashboard(df, backtest_report, output_name="strategy_backtest_dashboard.html"):
     """
     df: 包含 K 线、买卖信号、EMA/BB 等指标的 DataFrame
@@ -42,6 +71,8 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
 
     if "volume" not in df.columns:
         df["volume"] = 0
+
+    trades_df = backtest_report.get("trades_df") if isinstance(backtest_report, dict) else None
 
     fig = make_subplots(
         rows=2,
@@ -97,13 +128,25 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
                 col=1,
             )
 
+    _add_trade_interval_shapes(fig, trades_df)
+
     buy_series = df["buy_signal"] if "buy_signal" in df.columns else pd.Series(index=df.index, dtype=float)
     buy_signals = df[buy_series.notna()]
     if not buy_signals.empty:
+        buy_marker_x = [
+            df.loc[index + 1, "timestamp"] if index + 1 < len(df) else df.loc[index, "timestamp"]
+            for index in buy_signals.index
+        ]
+        buy_marker_y = [
+            df.loc[index + 1, "high"] * 1.012 if index + 1 < len(df) else df.loc[index, "high"] * 1.012
+            for index in buy_signals.index
+        ]
+        buy_customdata = buy_signals[["timestamp", "buy_signal"]].to_numpy()
         fig.add_trace(
             go.Scattergl(
-                x=buy_signals["timestamp"],
-                y=buy_signals["high"] * 1.012,
+                x=buy_marker_x,
+                y=buy_marker_y,
+                customdata=buy_customdata,
                 mode="markers",
                 name="Short Entry",
                 marker=dict(
@@ -115,7 +158,12 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
                 text=["做空入场"] * len(buy_signals),
                 textposition="top center",
                 textfont=dict(size=12, color="#facc15"),
-                hovertemplate="SHORT ENTRY<br>%{x}<br>%{y:.2f}<extra></extra>",
+                hovertemplate=(
+                    "SHORT ENTRY<br>"
+                    "标记K线: %{x}<br>"
+                    "信号K线: %{customdata[0]}<br>"
+                    "入场价: %{customdata[1]:.2f}<extra></extra>"
+                ),
             ),
             row=1,
             col=1,
@@ -124,10 +172,20 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
     sell_series = df["sell_signal"] if "sell_signal" in df.columns else pd.Series(index=df.index, dtype=float)
     sell_signals = df[sell_series.notna()]
     if not sell_signals.empty:
+        sell_marker_x = [
+            df.loc[index + 1, "timestamp"] if index + 1 < len(df) else df.loc[index, "timestamp"]
+            for index in sell_signals.index
+        ]
+        sell_marker_y = [
+            df.loc[index + 1, "low"] * 0.988 if index + 1 < len(df) else df.loc[index, "low"] * 0.988
+            for index in sell_signals.index
+        ]
+        sell_customdata = sell_signals[["timestamp", "sell_signal"]].to_numpy()
         fig.add_trace(
             go.Scattergl(
-                x=sell_signals["timestamp"],
-                y=sell_signals["low"] * 0.988,
+                x=sell_marker_x,
+                y=sell_marker_y,
+                customdata=sell_customdata,
                 mode="markers",
                 name="Short Exit",
                 marker=dict(
@@ -139,7 +197,12 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
                 text=["做空出场"] * len(sell_signals),
                 textposition="bottom center",
                 textfont=dict(size=12, color="#38bdf8"),
-                hovertemplate="SHORT EXIT<br>%{x}<br>%{y:.2f}<extra></extra>",
+                hovertemplate=(
+                    "SHORT EXIT<br>"
+                    "标记K线: %{x}<br>"
+                    "信号K线: %{customdata[0]}<br>"
+                    "出场价: %{customdata[1]:.2f}<extra></extra>"
+                ),
             ),
             row=1,
             col=1,

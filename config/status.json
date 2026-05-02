@@ -2,10 +2,11 @@
   "service_status": "running",
   "position_status": "flat",
   "current_phase": "idle",
-  "last_processed_4h_bar_time": "2026-04-29T08:00:00",
+  "last_processed_4h_bar_time": "2026-05-02T00:00:00",
   "entry_price": 0.0,
   "entry_time": "",
-  "last_action": "HOLD",
-  "last_score": 0.0,
-  "last_processed_1h_bar_time": "2026-04-29T13:00:00"
+  "last_action": "SKIP",
+  "last_score": 38.0,
+  "last_processed_1h_bar_time": "2026-05-02T04:00:00",
+  "last_entry_score": 0.0
 }

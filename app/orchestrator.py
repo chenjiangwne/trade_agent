@@ -8,7 +8,7 @@ from loguru import logger
 from services.decision_service import make_decision
 from services.execution_service import execute_order
 from services.market_data_service import load_market_data
-from services.push_message import push_failure_message
+from services.push_message import push_failure_message, push_message
 from services.status_service import load_status, save_status
 
 
@@ -45,6 +45,37 @@ def run_once(project_root: Path, config: dict[str, Any], force_process: bool = F
         logger.info("force_process enabled for this run; decision flow will execute regardless of last_processed_4h_bar_time")
 
     decision = make_decision(config, status, df_1h, df_4h, df_daily, latest_bar_time)
+    current_close = float(df_1h.iloc[-1]["close"])
+    current_time = str(df_1h.iloc[-1]["timestamp"].isoformat())
+    if decision["action"] == "SHORT":
+        push_message(
+            config,
+            title="trade_agent short entry signal",
+            content=(
+                f"symbol={config['basic']['symbol']}\n"
+                f"signal_time={current_time}\n"
+                f"bar_time={decision['bar_time']}\n"
+                f"entry_price={current_close}\n"
+                f"current_close={current_close}\n"
+                f"score={decision['score']}\n"
+                f"reason={decision.get('reason', 'no_metric')}"
+            ),
+        )
+    elif decision["action"] == "EXIT":
+        push_message(
+            config,
+            title="trade_agent exit signal",
+            content=(
+                f"symbol={config['basic']['symbol']}\n"
+                f"signal_time={current_time}\n"
+                f"bar_time={decision['bar_time']}\n"
+                f"entry_price={status.get('entry_price', '')}\n"
+                f"exit_price={current_close}\n"
+                f"current_close={current_close}\n"
+                f"score={decision['score']}\n"
+                f"reason={decision.get('reason', 'no_metric')}"
+            ),
+        )
     execution_result = execute_order(config, status, decision, df_1h)
 
     status.update(execution_result["status_updates"])

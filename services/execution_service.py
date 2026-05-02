@@ -29,6 +29,7 @@ def execute_order(
                 "position_status": "short",
                 "entry_price": last_close,
                 "entry_time": last_time,
+                "last_entry_score": float(decision.get("entry_score", decision["score"])),
                 "current_phase": "entry_check",
             }
         )
@@ -38,6 +39,7 @@ def execute_order(
                 "position_status": "flat",
                 "entry_price": 0.0,
                 "entry_time": "",
+                "last_entry_score": 0.0,
                 "current_phase": "exit_check",
             }
         )
@@ -45,6 +47,7 @@ def execute_order(
         updates["position_status"] = status["position_status"]
         updates["entry_price"] = status["entry_price"]
         updates["entry_time"] = status["entry_time"]
+        updates["last_entry_score"] = float(status.get("last_entry_score", 0.0))
 
     if not config["trade"]["paper_trade"]:
         _log_live_execution_request(config, status, decision)
