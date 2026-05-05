@@ -5,6 +5,7 @@
 ## 会话记录
 
 - 对话 ID: `codex resume 019d8be4-1639-7940-951f-4bb2fd0dfb70`
+run codex resume 019df6d3-0255-70e3-a517-8ce39dd71f08
 
 ## 当前能力
 
@@ -199,11 +200,6 @@ decision=BUY score=9.0 metrics=daily_above_ema200 | daily_ema200_rising | 4h_ema
 - `quantity`
   下单数量
 
-- `exit_freeze_bars`
-  持仓后冻结的 4H K 线数量。
-  在冻结期内不会执行 exit 逻辑，系统会直接返回 `HOLD`。
-  当前默认值为 `3`。
-
 ### `network`
 
 - `proxy`
@@ -305,3 +301,193 @@ $env:BINANCE_SECRET_KEY="your_secret_key"
 - 给 live 下单补成交确认和异常回滚
 - 增加 15m 执行层过滤
 - 增加 Docker / 守护进程部署方式
+
+## status.json �ֶ�˵��
+
+`config/status.json` �����־û���������״̬�͵�ǰ��λ״̬������ÿ�ֻ��д����
+
+ʾ����
+
+```json
+{
+  "service_status": "running",
+  "position_status": "flat",
+  "current_phase": "idle",
+  "last_processed_1h_bar_time": "2026-05-05T15:00:00",
+  "last_processed_4h_bar_time": "2026-05-05T12:00:00",
+  "entry_price": 0.0,
+  "entry_time": "",
+  "last_action": "SKIP",
+  "last_score": 0.0,
+  "last_entry_score": 0.0,
+  "initial_entry_price": 0.0,
+  "initial_stop_price": 0.0,
+  "peak_rr": 0.0
+}
+```
+
+�ֶκ��壺
+
+- `service_status`
+  ����״̬������ֵ��`running` / `stopped` / `error`��
+
+- `position_status`
+  ��λ״̬��`flat` ��ʾ�ղ֣�`short` ��ʾ��ǰ�����ղ�λ��
+
+- `current_phase`
+  ��ǰ���̽׶α�ǣ�������־�����ϡ�����ֵ��`idle` / `entry_check` / `exit_check`��
+
+- `last_processed_1h_bar_time`
+  ���һ���Ѵ�����ɵ� 1h K ��ʱ�䣨����ʱ�䣩��
+
+- `last_processed_4h_bar_time`
+  ���һ���Ѵ�����ɵ� 4h K ��ʱ�䣨����ʱ�䣩��
+
+- `entry_price`
+  ��ǰ�ֲֵ��볡�۸񡣿ղ�ʱΪ `0.0`��
+
+- `entry_time`
+  ��ǰ�ֲֵ��볡ʱ�䡣�ղ�ʱΪ���ַ�����
+
+- `last_action`
+  ��һ�����������ն���������ֵ��`SHORT` / `EXIT` / `HOLD` / `SKIP`��
+
+- `last_score`
+  ��һ�ֲ����ܷ֡�
+
+- `last_entry_score`
+  ���һ�ο��ֻ�Ӳ�ʱ�ķ��������ڡ��ֲ��мӲ��ż��������߼���
+
+- `initial_entry_price`
+  ���ֲֳֵġ��״��볡�ۡ����Ӳ�ʱ�����ǣ�����������/�س����˳��жϡ�
+
+- `initial_stop_price`
+  ���ֲֳֵĳ�ʼֹ��ۣ��ṹֹ�𣩣�����Ӳֹ�����ؼ��㡣
+
+- `peak_rr`
+  ��ǰ�ֲ��ڼ��¼������� RR��ӯ���ȣ������ڶ�ֹ̬ӯ/�˳��߼���
+
+˵����
+
+- �� `status.json` ������ʱ��������Զ�����Ĭ���ļ���
+- �� `status.json` ��ʽ�𻵣��ǺϷ� JSON��ʱ��������Զ��ؽ�Ĭ���ļ�����¼��־��
+
+## ��Ŀ�ļ�˵�������£�
+
+����˵�����ڵ�ǰ�ֿ�ʵ���ļ������� `__pycache__` �� `.pyc`����
+
+### ��Ŀ¼�ļ�
+
+- `README.md`
+  ��Ŀ˵���ĵ���
+
+- `requirements.txt`
+  Python �����б���
+
+- `run_trade_agent.bat`
+  Windows �����ű�������ģʽ����
+
+- `run_trade_agent_proxy.bat`
+  Windows �����ű�����������������
+
+- `backtest_result_with_signals.xlsx`
+  �ز����ļ������������ź��У���
+
+- `strategy_backtest_dashboard_fixed_btc.html`
+  �ز���ӻ�����ҳ�棨HTML����
+
+### app/
+
+- `app/main.py`
+  ������ڡ�����������á���ʼ����־��ѭ�����ȡ��쳣������������
+
+- `app/orchestrator.py`
+  ���������̱��ţ���ȡ��У�����ݡ����þ��ߡ�ִ�ж�����������Ϣ��д��״̬��
+
+- `app/__init__.py`
+  ������ļ���
+
+### services/
+
+- `services/market_data_service.py`
+  �г����ݷ���
+  1) ���뽻����ʱ��
+  2) ����ͬ�� 1h/4h/1d K ��
+  3) У���������� OHLCV �Ϸ���
+  4) �ṩ��һ�� K �ߵȴ�ʱ�����
+
+- `services/decision_service.py`
+  ���߷���
+  1) ���ò������֣�`testsuite_result`��
+  2) ��������/�Ӳ��ż�
+  3) ���������ڡ�Ӳֹ�𡢶�̬�˳�
+  4) �����׼��������`SHORT/HOLD/EXIT`����״̬�����ֶ�
+
+- `services/execution_service.py`
+  ִ�з���
+  1) �����߽��ӳ��Ϊ״̬���
+  2) `paper_trade` �� `live` ��֧����
+  3) `live` �¼�¼�µ�������Կȱʧʱ���澯���µ���
+
+- `services/status_service.py`
+  ״̬�־û����񣺶�д `config/status.json`��֧�֣�
+  1) �ļ�������ʱ�Զ�����Ĭ��״̬
+  2) JSON ��ʱ�Զ��ؽ�Ĭ��״̬
+
+- `services/push_message.py`
+  ��Ϣ���ͷ�����ҵ΢��/�澯���ͷ�װ����
+
+- `services/__init__.py`
+  ������ļ���
+
+### strategy/
+
+- `strategy/FourHour_short.py`
+  ��ǰ�������ղ���ʵ�֣����֡��볡�������˳����������ָ����㡣
+
+- `strategy/FourHour_short_backup.py`
+  ���ղ��Ա��ݰ汾�����ڻع�/���գ���
+
+- `strategy/FourHour_long.py`
+  ������԰汾����ǰ��Ŀ��������Ҫ�����գ���
+
+- `strategy/__init__.py`
+  ������ļ���
+
+### backtest/
+
+- `backtest/backtest.py`
+  �ز������ű�����ȡ��ʷ���ݣ������������������������źš�
+
+- `backtest/generate_short_html.py`
+  ���ջز���ӻ���������������ͼ+ָ��ͼ+����ͳ�ƿ��� HTML��
+
+- `backtest/generate_interactive_html.py`
+  ��һ��ͨ�ý���ʽ�ز���ӻ���������
+
+### generic/
+
+- `generic/Common.py`
+  ͨ�ù��ߺ����������ö�ȡ�Ȼ�����������
+
+- `generic/logger.py`
+  ��־��ʼ������־�ļ�������á�
+
+- `generic/__init__.py`
+  ������ļ���
+
+### config/
+
+- `config/config.yaml`
+  �������ļ������ױ�ġ�ʱ�����ڡ�����·������ز�����֪ͨ����־�ȡ�
+
+- `config/status.json`
+  ����״̬�ļ�������״̬����λ״̬��������� K ��ʱ�䡢����/ֹ��/RR �ȡ�
+
+### ��������־Ŀ¼������ʱ���ɣ�
+
+- `realdatas/`
+  ���� K �������ļ�Ŀ¼���� `BTC_USDT_3year_1h.xlsx`����
+
+- `reports/`
+  ������־Ŀ¼���� `trade_agent_YYYY-MM-DD_*.log`����

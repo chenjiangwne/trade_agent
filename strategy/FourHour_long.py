@@ -28,17 +28,16 @@ class Monitor:
 curr_time = int(time.time() * 1000)
 
 
-def is_system_ready(df_4h, df_daily):
+def is_system_ready(df_4h, df_daily, allow_stale: bool = False):
     if len(df_4h) < 200 or len(df_daily) < 40:
         logger.error("NOK! Daily data deficiency")
         return False
 
     last_ts = df_4h.iloc[-1]["timestamp"]
-    if ((time.time() * 1000) - last_ts.timestamp() * 1000) > (4 * 3600 * 1000 * 1.5):
+    if not allow_stale and ((time.time() * 1000) - last_ts.timestamp() * 1000) > (4 * 3600 * 1000 * 1.5):
         logger.error("NOK! Data is stale (Outdated)")
-        return True
+        return False
 
-    # 这里的逻辑可以比作 ADAS 里的传感器 Self-Test
     return True
 
 
@@ -48,7 +47,7 @@ def eval_trend(df_4h, df_daily):
     """
     res = Res["OK"]
 
-    if is_system_ready(df_4h, df_daily):
+    if not is_system_ready(df_4h, df_daily, allow_stale=True):
         logger.error("NOK! Daily data deficiency")
         return Res["ERR"], None
 

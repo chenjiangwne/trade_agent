@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile \"D:/RobotTest/workspace/trade_agent/backtest/generate_short_html.py\")",
+      "Bash(python \"D:/RobotTest/workspace/trade_agent/backtest/generate_short_html.py\")",
+      "Bash(python *)"
+    ]
+  }
+}

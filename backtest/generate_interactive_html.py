@@ -120,20 +120,41 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
 
     sell_series = df["sell_signal"] if "sell_signal" in df.columns else pd.Series(index=df.index, dtype=float)
     sell_signals = df[sell_series.notna()]
-    if not sell_signals.empty:
+    sell_signal_type_series = df["sell_signal_type"] if "sell_signal_type" in df.columns else pd.Series(index=df.index, dtype=object)
+    hard_stop_signals = sell_signals[sell_signal_type_series.loc[sell_signals.index] == "HARD_STOP"]
+    normal_exit_signals = sell_signals[sell_signal_type_series.loc[sell_signals.index] != "HARD_STOP"]
+    if not normal_exit_signals.empty:
         fig.add_trace(
             go.Scatter(
-                x=sell_signals["timestamp"],
-                y=sell_signals["high"] * 1.008,
+                x=normal_exit_signals["timestamp"],
+                y=normal_exit_signals["high"] * 1.008,
                 mode="markers",
                 name="Sell",
+                marker=dict(
+                    symbol="triangle-down",
+                    size=16,
+                    color="#f59e0b",
+                    line=dict(width=2, color="#f8fafc"),
+                ),
+                hovertemplate="SELL<br>%{x}<br>%{y:.2f}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+        )
+    if not hard_stop_signals.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=hard_stop_signals["timestamp"],
+                y=hard_stop_signals["high"] * 1.008,
+                mode="markers",
+                name="HARD_STOP",
                 marker=dict(
                     symbol="triangle-down",
                     size=16,
                     color="#ef4444",
                     line=dict(width=2, color="#f8fafc"),
                 ),
-                hovertemplate="SELL<br>%{x}<br>%{y:.2f}<extra></extra>",
+                hovertemplate="HARD_STOP<br>%{x}<br>%{y:.2f}<extra></extra>",
             ),
             row=1,
             col=1,
@@ -478,12 +499,15 @@ def backtest_long_refined(df_4h, fee_rate=0.0004):
 
 
 if __name__ == "__main__":
-    four_path = "backtest_result_with_signals.xlsx"
+    import sys
+
+    four_path = sys.argv[1] if len(sys.argv) > 1 else "backtest_result_long_with_signals.xlsx"
+    output_name = sys.argv[2] if len(sys.argv) > 2 else "strategy_backtest_dashboard_long.html"
     df_4h = pd.read_excel(four_path)
     df_4h.set_index("timestamp", inplace=True)
 
     report_stats = backtest_long_refined(df_4h)
-    generate_interactive_html_with_dashboard(df_4h, report_stats)
+    generate_interactive_html_with_dashboard(df_4h, report_stats, output_name=output_name)
 
     print("\n" + "=" * 30)
     print("BTC 近3年自动化回测报告")

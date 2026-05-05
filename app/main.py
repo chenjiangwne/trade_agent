@@ -83,18 +83,18 @@ def main() -> None:
                 raise
             logger.info("loop {} completed: {}", attempt, result)
             if attempt == 1:
-                logger.info("initial run completed; next loop will follow exchange 1h schedule")
+                logger.info("initial run completed; next loop will follow exchange 4h schedule")
                 attempt += 1
                 continue
             wait_seconds = seconds_until_next_timeframe_bar_by_exchange(
                 config,
-                timeframe=config["basic"]["timeframe_1h"],
+                timeframe=config["basic"]["timeframe_4h"],
                 offset_seconds=config.get("runtime", {}).get("run_delay_seconds", 5),
             )
             logger.info(
                 "sleeping {} seconds until next {} bar based on exchange clock",
                 wait_seconds,
-                config["basic"]["timeframe_1h"],
+                config["basic"]["timeframe_4h"],
             )
             attempt += 1
             _sleep_with_heartbeat(config, wait_seconds)

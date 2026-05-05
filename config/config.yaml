@@ -5,12 +5,13 @@ basic:
   timeframe_4h: 4h
   timeframe_daily: 1d
   buypoint: 39
-  buypoint_step: 3
+  buypoint_step: 100
   mode: paper
   max_attempts: 3
-  cooldown_count: 0
 
 data:
+  backup_platforms:
+    - okx
   realdata_dir: realdatas
   kline_1h_file: realdatas/BTC_USDT_3year_1h.xlsx
   kline_4h_file: realdatas/BTC_USDT_3year_4h.xlsx
@@ -31,7 +32,6 @@ status:
 trade:
   paper_trade: false
   quantity: 0.001
-  exit_freeze_bars: 3
 
 network:
   proxy: "http://127.0.0.1:7897"

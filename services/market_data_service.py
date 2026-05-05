@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,128 @@ from loguru import logger
 
 
 OHLCV_COLUMNS = ["timestamp", "open", "high", "low", "close", "volume"]
+BEIJING_TZ = "Asia/Shanghai"
+
+
+def _switch_clash_node_for_failover(project_root: Path, config: dict[str, Any]) -> bool:
+    failover = config.get("network", {}).get("clash_failover", {})
+    if not bool(failover.get("enabled", True)):
+        return False
+
+    script_path = project_root / "tools" / "switch_clash_node.py"
+    if not script_path.exists():
+        logger.warning("clash failover script not found: {}", script_path)
+        return False
+
+    controller = str(failover.get("controller", "http://127.0.0.1:9097"))
+    secret = str(failover.get("secret", "fdasfasfdaddf"))
+    group = str(failover.get("group", "GLOBAL"))
+    node = str(failover.get("node", "AUTO"))
+    timeout_seconds = int(failover.get("timeout_seconds", 15))
+
+    cmd = [
+        "python",
+        str(script_path),
+        "--controller",
+        controller,
+        "--secret",
+        secret,
+        "--group",
+        group,
+        "--node",
+        node,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        if result.returncode != 0:
+            logger.warning(
+                "clash failover switch failed: code={} stdout={} stderr={}",
+                result.returncode,
+                stdout,
+                stderr,
+            )
+            return False
+        logger.info("clash failover switched node successfully: {}", stdout)
+        return True
+    except Exception as exc:
+        logger.warning("clash failover switch exception: {}", exc)
+        return False
+
+
+def _can_reach_binance(config: dict[str, Any], timeout_ms: int = 8000) -> bool:
+    try:
+        exchange = ccxt.binance(
+            {
+                "enableRateLimit": True,
+                "timeout": timeout_ms,
+                "proxies": _proxy_config(config),
+                "options": {
+                    "adjustForTimeDifference": True,
+                    "defaultType": "future",
+                },
+            }
+        )
+        server_time = exchange.fetch_time()
+        return server_time is not None
+    except Exception as exc:
+        logger.warning("binance connectivity check failed: {}", exc)
+        return False
+
+
+def _try_clash_failover_and_wait_binance(project_root: Path, config: dict[str, Any]) -> bool:
+    failover = config.get("network", {}).get("clash_failover", {})
+    max_rounds = max(int(failover.get("max_rounds", 3)), 1)
+    warmup_seconds = max(float(failover.get("warmup_seconds", 3.0)), 0.5)
+    check_timeout_ms = max(int(failover.get("check_timeout_ms", 8000)), 1000)
+    group = str(failover.get("group", "GLOBAL"))
+
+    node_candidates = failover.get("nodes")
+    if not isinstance(node_candidates, list) or not node_candidates:
+        node_candidates = [str(failover.get("node", "AUTO"))]
+    node_candidates = [str(node) for node in node_candidates if str(node).strip()]
+    if not node_candidates:
+        node_candidates = ["AUTO"]
+
+    for round_idx in range(max_rounds):
+        node = node_candidates[round_idx % len(node_candidates)]
+        logger.warning(
+            "market data failover round {}/{}: switch clash group={} node= {}",
+            round_idx + 1,
+            max_rounds,
+            group,
+            node,
+        )
+
+        local_cfg = {
+            **config,
+            "network": {
+                **config.get("network", {}),
+                "clash_failover": {
+                    **failover,
+                    "group": group,
+                    "node": node,
+                },
+            },
+        }
+        switched = _switch_clash_node_for_failover(project_root, local_cfg)
+        if not switched:
+            continue
+
+        time.sleep(warmup_seconds)
+        if _can_reach_binance(config, timeout_ms=check_timeout_ms):
+            logger.info("binance connectivity recovered after clash failover")
+            return True
+
+    logger.error("clash failover exhausted: binance still unreachable after {} rounds", max_rounds)
+    return False
 
 
 def _proxy_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -19,15 +142,36 @@ def _proxy_config(config: dict[str, Any]) -> dict[str, Any]:
     return {"http": proxy, "https": proxy}
 
 
-def _build_exchange(config: dict[str, Any]) -> ccxt.Exchange:
-    exchange = ccxt.binance(
+def _exchange_class(name: str):
+    exchange_name = str(name).lower()
+    exchange_class = getattr(ccxt, exchange_name, None)
+    if exchange_class is None:
+        raise ValueError(f"Unsupported exchange: {name}")
+    return exchange_class
+
+
+def _exchange_names(config: dict[str, Any]) -> list[str]:
+    primary = str(config["basic"].get("platform", "binance"))
+    backups = [str(item) for item in config.get("data", {}).get("backup_platforms", []) if str(item).strip()]
+    ordered = [primary, *backups]
+    deduped: list[str] = []
+    for name in ordered:
+        lowered = name.lower()
+        if lowered not in deduped:
+            deduped.append(lowered)
+    return deduped
+
+
+def _build_exchange(config: dict[str, Any], exchange_name: str | None = None) -> ccxt.Exchange:
+    exchange_class = _exchange_class(exchange_name or config["basic"].get("platform", "binance"))
+    exchange = exchange_class(
         {
             "enableRateLimit": True,
             "timeout": 20000,
             "proxies": _proxy_config(config),
             "options": {
                 "adjustForTimeDifference": True,
-                "defaultType": "spot",
+                "defaultType": "future",
             },
         }
     )
@@ -35,35 +179,53 @@ def _build_exchange(config: dict[str, Any]) -> ccxt.Exchange:
 
 
 def fetch_exchange_clock(config: dict[str, Any]) -> dict[str, Any]:
-    exchange = _build_exchange(config)
-    exchange_time_ms = exchange.fetch_time()
-    if exchange_time_ms is None:
-        raise RuntimeError("failed to fetch exchange time")
+    exchange_names = _exchange_names(config)
+    last_error: Exception | None = None
+    for exchange_name in exchange_names:
+        try:
+            exchange = _build_exchange(config, exchange_name=exchange_name)
+            exchange_time_ms = exchange.fetch_time()
+            if exchange_time_ms is None:
+                raise RuntimeError("failed to fetch exchange time")
 
-    exchange_now = pd.to_datetime(exchange_time_ms, unit="ms").tz_localize(None)
-    local_now = pd.Timestamp.utcnow().tz_localize(None)
-    diff_seconds = abs((local_now - exchange_now).total_seconds())
-    max_diff_seconds = int(config.get("runtime", {}).get("max_clock_diff_seconds", 60))
-    if diff_seconds > max_diff_seconds:
-        raise RuntimeError(
-            f"local clock drift too large: local={local_now.isoformat()} exchange={exchange_now.isoformat()} diff={diff_seconds:.0f}s"
-        )
+            exchange_now = pd.to_datetime(exchange_time_ms, unit="ms", utc=True).tz_convert(BEIJING_TZ).tz_localize(None)
+            local_now = pd.Timestamp.now(tz=BEIJING_TZ).tz_localize(None)
+            diff_seconds = abs((local_now - exchange_now).total_seconds())
+            max_diff_seconds = int(config.get("runtime", {}).get("max_clock_diff_seconds", 60))
+            if diff_seconds > max_diff_seconds:
+                raise RuntimeError(
+                    f"local clock drift too large: local={local_now.isoformat()} exchange={exchange_now.isoformat()} diff={diff_seconds:.0f}s"
+                )
 
-    logger.info(
-        "exchange clock ok: exchange_now={} local_now={} diff_seconds={:.1f}",
-        exchange_now.isoformat(),
-        local_now.isoformat(),
-        diff_seconds,
-    )
-    return {
-        "exchange_now": exchange_now,
-        "local_now": local_now,
-        "diff_seconds": diff_seconds,
-    }
+            logger.info(
+                "exchange clock ok: source={} exchange_now={} local_now={} diff_seconds={:.1f}",
+                exchange_name,
+                exchange_now.isoformat(),
+                local_now.isoformat(),
+                diff_seconds,
+            )
+            return {
+                "exchange_now": exchange_now,
+                "local_now": local_now,
+                "diff_seconds": diff_seconds,
+                "exchange_name": exchange_name,
+            }
+        except Exception as exc:
+            last_error = exc
+            logger.warning("exchange clock health check failed for {}: {}", exchange_name, exc)
+
+    raise RuntimeError(f"all exchange clock health checks failed: {last_error}")
 
 
 def _symbol_to_exchange_symbol(symbol: str) -> str:
-    return symbol if "/" in symbol else f"{symbol[:-4]}/{symbol[-4:]}"
+    if ":" in symbol and "/" in symbol:
+        return symbol
+    if "/" in symbol:
+        base, quote = symbol.split("/", 1)
+        return f"{base}/{quote}:{quote}"
+    quote = symbol[-4:]
+    base = symbol[:-4]
+    return f"{base}/{quote}:{quote}"
 
 
 def _symbol_to_file_prefix(symbol: str) -> str:
@@ -89,7 +251,12 @@ def _standardize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Missing columns: {missing}")
 
     renamed = renamed[OHLCV_COLUMNS].copy()
-    renamed["timestamp"] = pd.to_datetime(renamed["timestamp"]).dt.tz_localize(None)
+    parsed_ts = pd.to_datetime(renamed["timestamp"], errors="coerce")
+    if getattr(parsed_ts.dt, "tz", None) is None:
+        # Local files are expected to be Beijing time in this project.
+        renamed["timestamp"] = parsed_ts.dt.tz_localize(None)
+    else:
+        renamed["timestamp"] = parsed_ts.dt.tz_convert(BEIJING_TZ).dt.tz_localize(None)
     for column in OHLCV_COLUMNS[1:]:
         renamed[column] = pd.to_numeric(renamed[column], errors="coerce")
 
@@ -117,6 +284,12 @@ def _expected_delta(timeframe: str) -> pd.Timedelta:
 
 def _timeframe_milliseconds(timeframe: str) -> int:
     return int(_expected_delta(timeframe).total_seconds() * 1000)
+
+
+def _naive_beijing_to_utc_ms(ts: pd.Timestamp) -> int:
+    """Interpret naive timestamp as Beijing time, then convert to UTC milliseconds."""
+    beijing_ts = pd.Timestamp(ts).tz_localize(BEIJING_TZ)
+    return int(beijing_ts.tz_convert("UTC").timestamp() * 1000)
 
 
 def _ensure_ohlc_sanity(df: pd.DataFrame, label: str) -> None:
@@ -159,7 +332,7 @@ def _last_gap_repair_since(existing: pd.DataFrame, timeframe: str) -> int | None
     # Historical gaps are reported by validation, but should not force
     # the incremental fetch to rewind far into old history and miss the newest bars.
     last_ts = pd.Timestamp(existing.iloc[-1]["timestamp"])
-    return int(last_ts.timestamp() * 1000) - _timeframe_milliseconds(timeframe)
+    return _naive_beijing_to_utc_ms(last_ts) - _timeframe_milliseconds(timeframe)
 
 
 def _validate_market_frame(
@@ -253,6 +426,30 @@ def _resolve_data_file(project_root: Path, config: dict[str, Any], timeframe: st
     return project_root / data_config["realdata_dir"] / filename
 
 
+def _build_exchange_with_health_check(config: dict[str, Any]) -> tuple[str, ccxt.Exchange]:
+    symbol = _symbol_to_exchange_symbol(config["basic"]["symbol"])
+    primary_exchange_name = str(config["basic"].get("platform", "binance")).lower()
+    backup_exchange_names = _exchange_names(config)
+    last_error: Exception | None = None
+
+    for exchange_name in backup_exchange_names:
+        try:
+            exchange = _build_exchange(config, exchange_name=exchange_name)
+            exchange.load_markets()
+            exchange.market(symbol)
+            exchange.fetch_time()
+            if exchange_name != primary_exchange_name:
+                logger.warning("primary exchange unavailable, fallback to backup source {}", exchange_name)
+            else:
+                logger.info("market data source health check passed: {}", exchange_name)
+            return exchange_name, exchange
+        except Exception as exc:
+            last_error = exc
+            logger.warning("market data source health check failed for {}: {}", exchange_name, exc)
+
+    raise RuntimeError(f"all market data sources failed health check for {symbol}: {last_error}")
+
+
 def _fetch_closed_bars(
     exchange: ccxt.Exchange,
     symbol: str,
@@ -266,7 +463,9 @@ def _fetch_closed_bars(
         return pd.DataFrame(columns=OHLCV_COLUMNS)
 
     frame = pd.DataFrame(raw_bars, columns=OHLCV_COLUMNS)
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms").dt.tz_localize(None)
+    frame["timestamp"] = (
+        pd.to_datetime(frame["timestamp"], unit="ms", utc=True).dt.tz_convert(BEIJING_TZ).dt.tz_localize(None)
+    )
     for column in OHLCV_COLUMNS[1:]:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
@@ -297,7 +496,7 @@ def _fetch_incremental_bars(
             break
 
         batches.append(batch)
-        last_ts_ms = int(pd.Timestamp(batch.iloc[-1]["timestamp"]).timestamp() * 1000)
+        last_ts_ms = _naive_beijing_to_utc_ms(pd.Timestamp(batch.iloc[-1]["timestamp"]))
         next_since = last_ts_ms + step_ms
         if next_since <= since:
             break
@@ -327,6 +526,7 @@ def _sync_latest_ohlcv_with_retry(
     config: dict[str, Any],
     timeframe: str,
     exchange_now: pd.Timestamp,
+    exchange: ccxt.Exchange,
 ) -> Path:
     max_attempts = int(config.get("data", {}).get("validation", {}).get("max_sync_attempts", 3))
     max_attempts = max(max_attempts, 1)
@@ -335,7 +535,7 @@ def _sync_latest_ohlcv_with_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             logger.info("sync attempt {}/{} for {}", attempt, max_attempts, timeframe)
-            return sync_latest_ohlcv(project_root, config, timeframe, exchange_now=exchange_now)
+            return sync_latest_ohlcv(project_root, config, timeframe, exchange_now=exchange_now, exchange=exchange)
         except Exception as exc:
             last_error = exc
             logger.warning(
@@ -351,10 +551,15 @@ def _sync_latest_ohlcv_with_retry(
     raise RuntimeError(f"sync failed for {timeframe} after {max_attempts} attempts: {last_error}")
 
 
-def sync_latest_ohlcv(project_root: Path, config: dict[str, Any], timeframe: str, exchange_now: pd.Timestamp) -> Path:
+def sync_latest_ohlcv(
+    project_root: Path,
+    config: dict[str, Any],
+    timeframe: str,
+    exchange_now: pd.Timestamp,
+    exchange: ccxt.Exchange,
+) -> Path:
     path = _resolve_data_file(project_root, config, timeframe)
     existing = _load_table(path)
-    exchange = _build_exchange(config)
     symbol = _symbol_to_exchange_symbol(config["basic"]["symbol"])
     existing_rows = len(existing)
 
@@ -396,8 +601,8 @@ def _latest_closed_bar_time_from_exchange(
     config: dict[str, Any],
     timeframe: str,
     exchange_now: pd.Timestamp,
+    exchange: ccxt.Exchange,
 ) -> pd.Timestamp:
-    exchange = _build_exchange(config)
     symbol = _symbol_to_exchange_symbol(config["basic"]["symbol"])
     bars = _fetch_closed_bars(exchange, symbol, timeframe, exchange_now=exchange_now, since=None, limit=10)
     if bars.empty:
@@ -410,10 +615,11 @@ def _is_local_closed_bar_aligned(
     config: dict[str, Any],
     timeframe: str,
     exchange_now: pd.Timestamp,
+    exchange: ccxt.Exchange,
 ) -> bool:
     path = _resolve_data_file(project_root, config, timeframe)
     local_df = _load_table(path)
-    exchange_latest = _latest_closed_bar_time_from_exchange(config, timeframe, exchange_now)
+    exchange_latest = _latest_closed_bar_time_from_exchange(config, timeframe, exchange_now, exchange)
 
     if local_df.empty:
         logger.error(
@@ -442,10 +648,11 @@ def _alignment_failure_reason(
     config: dict[str, Any],
     timeframe: str,
     exchange_now: pd.Timestamp,
+    exchange: ccxt.Exchange,
 ) -> str:
     path = _resolve_data_file(project_root, config, timeframe)
     local_df = _load_table(path)
-    exchange_latest = _latest_closed_bar_time_from_exchange(config, timeframe, exchange_now)
+    exchange_latest = _latest_closed_bar_time_from_exchange(config, timeframe, exchange_now, exchange)
 
     if local_df.empty:
         return (
@@ -466,58 +673,72 @@ def _alignment_failure_reason(
     )
 
 
-def load_market_data(project_root: Path, config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
-    timeframe_1h = config["basic"]["timeframe_1h"]
-    timeframe_4h = config["basic"]["timeframe_4h"]
-    timeframe_daily = config["basic"]["timeframe_daily"]
-    validation_config = config["data"].get("validation", {})
-    min_rows_1h = int(validation_config.get("min_rows_1h", 200))
-    min_rows_4h = int(validation_config.get("min_rows_4h", 200))
-    min_rows_1d = int(validation_config.get("min_rows_1d", 60))
+def load_market_data(project_root: Path, config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str, str]:
+    def _load_once() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str, str]:
+        timeframe_1h = config["basic"]["timeframe_1h"]
+        timeframe_4h = config["basic"]["timeframe_4h"]
+        timeframe_daily = config["basic"]["timeframe_daily"]
+        validation_config = config["data"].get("validation", {})
+        min_rows_1h = int(validation_config.get("min_rows_1h", 200))
+        min_rows_4h = int(validation_config.get("min_rows_4h", 200))
+        min_rows_1d = int(validation_config.get("min_rows_1d", 60))
 
-    exchange_now = fetch_exchange_clock(config)["exchange_now"]
-    bar_1h_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_1h, exchange_now)
-    bar_4h_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now)
-    bar_1d_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now)
+        exchange_clock = fetch_exchange_clock(config)
+        exchange_now = exchange_clock["exchange_now"]
+        source_name, exchange = _build_exchange_with_health_check(config)
+        logger.info("using market data source: {}", source_name)
+        bar_1h_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_1h, exchange_now, exchange)
+        bar_4h_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now, exchange)
+        bar_1d_ok = _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now, exchange)
 
-    if not bar_1h_ok or not bar_4h_ok or not bar_1d_ok:
-        logger.warning("local xlsx closed bar time is not aligned with exchange, start sync")
-        _sync_latest_ohlcv_with_retry(project_root, config, timeframe_1h, exchange_now=exchange_now)
-        time.sleep(0.2)
-        _sync_latest_ohlcv_with_retry(project_root, config, timeframe_4h, exchange_now=exchange_now)
-        time.sleep(0.2)
-        _sync_latest_ohlcv_with_retry(project_root, config, timeframe_daily, exchange_now=exchange_now)
+        if not bar_1h_ok or not bar_4h_ok or not bar_1d_ok:
+            logger.warning("local xlsx closed bar time is not aligned with exchange, start sync")
+            _sync_latest_ohlcv_with_retry(project_root, config, timeframe_1h, exchange_now=exchange_now, exchange=exchange)
+            time.sleep(0.2)
+            _sync_latest_ohlcv_with_retry(project_root, config, timeframe_4h, exchange_now=exchange_now, exchange=exchange)
+            time.sleep(0.2)
+            _sync_latest_ohlcv_with_retry(project_root, config, timeframe_daily, exchange_now=exchange_now, exchange=exchange)
 
-        if not _is_local_closed_bar_aligned(project_root, config, timeframe_1h, exchange_now):
-            raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_1h, exchange_now))
-        if not _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now):
-            raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_4h, exchange_now))
-        if not _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now):
-            raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_daily, exchange_now))
+            if not _is_local_closed_bar_aligned(project_root, config, timeframe_1h, exchange_now, exchange):
+                raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_1h, exchange_now, exchange))
+            if not _is_local_closed_bar_aligned(project_root, config, timeframe_4h, exchange_now, exchange):
+                raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_4h, exchange_now, exchange))
+            if not _is_local_closed_bar_aligned(project_root, config, timeframe_daily, exchange_now, exchange):
+                raise RuntimeError(_alignment_failure_reason(project_root, config, timeframe_daily, exchange_now, exchange))
 
-    df_1h = _load_table(_resolve_data_file(project_root, config, timeframe_1h))
-    df_4h = _load_table(_resolve_data_file(project_root, config, timeframe_4h))
-    df_daily = _load_table(_resolve_data_file(project_root, config, timeframe_daily))
+        df_1h = _load_table(_resolve_data_file(project_root, config, timeframe_1h))
+        df_4h = _load_table(_resolve_data_file(project_root, config, timeframe_4h))
+        df_daily = _load_table(_resolve_data_file(project_root, config, timeframe_daily))
 
-    if df_1h.empty or df_4h.empty or df_daily.empty:
-        raise RuntimeError("NOK! market data files are empty after sync")
+        if df_1h.empty or df_4h.empty or df_daily.empty:
+            raise RuntimeError("NOK! market data files are empty after sync")
 
-    df_1h, report_1h = _validate_market_frame(df_1h, timeframe_1h, min_rows_1h, "1h market data")
-    df_4h, report_4h = _validate_market_frame(df_4h, timeframe_4h, min_rows_4h, "4h market data")
-    df_daily, report_1d = _validate_market_frame(df_daily, timeframe_daily, min_rows_1d, "1d market data")
+        df_1h, report_1h = _validate_market_frame(df_1h, timeframe_1h, min_rows_1h, "1h market data")
+        df_4h, report_4h = _validate_market_frame(df_4h, timeframe_4h, min_rows_4h, "4h market data")
+        df_daily, report_1d = _validate_market_frame(df_daily, timeframe_daily, min_rows_1d, "1d market data")
 
-    logger.info(
-        "market data ready: 1h_rows={} 4h_rows={} 1d_rows={} 1h_gaps={} 4h_gaps={} 1d_gaps={}",
-        len(df_1h),
-        len(df_4h),
-        len(df_daily),
-        report_1h["gap_count"],
-        report_4h["gap_count"],
-        report_1d["gap_count"],
-    )
+        logger.info(
+            "market data ready: 1h_rows={} 4h_rows={} 1d_rows={} 1h_gaps={} 4h_gaps={} 1d_gaps={}",
+            len(df_1h),
+            len(df_4h),
+            len(df_daily),
+            report_1h["gap_count"],
+            report_4h["gap_count"],
+            report_1d["gap_count"],
+        )
 
-    latest_bar_time = str(pd.to_datetime(df_1h.iloc[-1]["timestamp"]).isoformat())
-    return df_1h, df_4h, df_daily, latest_bar_time
+        latest_1h_bar_time = str(pd.to_datetime(df_1h.iloc[-1]["timestamp"]).isoformat())
+        latest_4h_bar_time = str(pd.to_datetime(df_4h.iloc[-1]["timestamp"]).isoformat())
+        return df_1h, df_4h, df_daily, latest_1h_bar_time, latest_4h_bar_time
+
+    try:
+        return _load_once()
+    except Exception as first_error:
+        logger.warning("market data load failed, trying clash failover with connectivity probe: {}", first_error)
+        recovered = _try_clash_failover_and_wait_binance(project_root, config)
+        if not recovered:
+            raise
+        return _load_once()
 
 
 def seconds_until_next_timeframe_bar(timeframe: str, now: pd.Timestamp | None = None, offset_seconds: int = 5) -> int:
