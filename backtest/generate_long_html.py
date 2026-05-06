@@ -1,5 +1,4 @@
-﻿import os
-
+import os
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -25,11 +24,36 @@ def _safe_metric(report: dict, *keys, default=0):
     return default
 
 
-def generate_interactive_html_with_dashboard(df, backtest_report, output_name="strategy_backtest_dashboard.html"):
-    """
-    df: 包含 K 线、买卖信号、EMA/BB 等指标的 DataFrame
-    backtest_report: BacktestEngine().run_from_df() 返回的统计字典
-    """
+def _add_trade_interval_shapes(fig, trades_df: pd.DataFrame) -> None:
+    if trades_df is None or trades_df.empty:
+        return
+
+    frame = trades_df.copy()
+    frame["entry_time"] = pd.to_datetime(frame["entry_time"], errors="coerce")
+    frame["exit_time"] = pd.to_datetime(frame["exit_time"], errors="coerce")
+    frame["profit_abs"] = pd.to_numeric(frame["profit_abs"], errors="coerce")
+    frame = frame.dropna(subset=["entry_time", "exit_time", "profit_abs"])
+    if frame.empty:
+        return
+
+    for _, row in frame.iterrows():
+        is_win = float(row["profit_abs"]) > 0
+        fill = "rgba(14, 203, 129, 0.10)" if is_win else "rgba(246, 70, 93, 0.12)"
+        fig.add_shape(
+            type="rect",
+            x0=row["entry_time"],
+            x1=row["exit_time"],
+            y0=0,
+            y1=1,
+            xref="x",
+            yref="paper",
+            fillcolor=fill,
+            line=dict(width=0),
+            layer="below",
+        )
+
+
+def generate_interactive_html_with_dashboard(df, backtest_report, output_name="strategy_backtest_dashboard_long.html"):
     logger.info("---- Start Generating Interactive HTML Report with Dashboard ----")
 
     df = df.copy()
@@ -43,13 +67,15 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
     if "volume" not in df.columns:
         df["volume"] = 0
 
+    trades_df = backtest_report.get("trades_df") if isinstance(backtest_report, dict) else None
+
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.78, 0.22],
-        specs=[[{"secondary_y": False}], [{"secondary_y": False}]],
+        vertical_spacing=0.02,
+        row_heights=[0.94, 0.06],
+        specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
     )
 
     increasing_color = "#0ecb81"
@@ -72,6 +98,7 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
         ),
         row=1,
         col=1,
+        secondary_y=False,
     )
 
     overlay_candidates = [
@@ -84,7 +111,7 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
     for col, label in overlay_candidates:
         if col in df.columns:
             fig.add_trace(
-                go.Scatter(
+                go.Scattergl(
                     x=df["timestamp"],
                     y=df[col],
                     mode="lines",
@@ -95,70 +122,139 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
                 ),
                 row=1,
                 col=1,
+                secondary_y=False,
             )
+
+    _add_trade_interval_shapes(fig, trades_df)
+
+    if trades_df is not None and not trades_df.empty:
+        if "equity" not in trades_df.columns:
+            trades_df["equity"] = trades_df["profit_abs"].cumsum()
+
+        first_entry = trades_df["entry_time"].iloc[0]
+        eq_x = [first_entry] + trades_df["exit_time"].tolist()
+        eq_y = [0.0] + trades_df["equity"].tolist()
+        eq_y_smooth = pd.Series(eq_y).ewm(span=10, adjust=False).mean()
+
+        fig.add_trace(
+            go.Scattergl(
+                x=eq_x,
+                y=eq_y_smooth,
+                mode="lines",
+                name="Cumulative PnL (Left Axis)",
+                line=dict(color="#fbbf24", width=1.6),
+                opacity=0.85,
+                hovertemplate="累计盈亏<br>时间: %{x}<br>盈亏(USD): %{y:.2f}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
 
     buy_series = df["buy_signal"] if "buy_signal" in df.columns else pd.Series(index=df.index, dtype=float)
     buy_signals = df[buy_series.notna()]
     if not buy_signals.empty:
+        buy_marker_x = [df.loc[index, "timestamp"] for index in buy_signals.index]
+        buy_marker_y = [df.loc[index, "low"] * 0.994 for index in buy_signals.index]
+        buy_customdata = buy_signals[["timestamp", "buy_signal"]].to_numpy()
         fig.add_trace(
-            go.Scatter(
-                x=buy_signals["timestamp"],
-                y=buy_signals["low"] * 0.992,
+            go.Scattergl(
+                x=buy_marker_x,
+                y=buy_marker_y,
+                customdata=buy_customdata,
                 mode="markers",
-                name="Buy",
+                name="Long Entry",
                 marker=dict(
                     symbol="triangle-up",
-                    size=16,
-                    color="#22c55e",
-                    line=dict(width=2, color="#f8fafc"),
+                    size=24,
+                    color="#facc15",
+                    line=dict(width=3, color="#020617"),
                 ),
-                hovertemplate="BUY<br>%{x}<br>%{y:.2f}<extra></extra>",
+                text=["做多入场"] * len(buy_signals),
+                textposition="bottom center",
+                textfont=dict(size=12, color="#facc15"),
+                hovertemplate=(
+                    "LONG ENTRY<br>"
+                    "标记K线: %{x}<br>"
+                    "信号K线: %{customdata[0]}<br>"
+                    "入场价: %{customdata[1]:.2f}<extra></extra>"
+                ),
             ),
             row=1,
             col=1,
+            secondary_y=False,
         )
 
     sell_series = df["sell_signal"] if "sell_signal" in df.columns else pd.Series(index=df.index, dtype=float)
-    sell_signals = df[sell_series.notna()]
-    sell_signal_type_series = df["sell_signal_type"] if "sell_signal_type" in df.columns else pd.Series(index=df.index, dtype=object)
-    hard_stop_signals = sell_signals[sell_signal_type_series.loc[sell_signals.index] == "HARD_STOP"]
-    normal_exit_signals = sell_signals[sell_signal_type_series.loc[sell_signals.index] != "HARD_STOP"]
-    if not normal_exit_signals.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=normal_exit_signals["timestamp"],
-                y=normal_exit_signals["high"] * 1.008,
-                mode="markers",
-                name="Sell",
-                marker=dict(
-                    symbol="triangle-down",
-                    size=16,
-                    color="#f59e0b",
-                    line=dict(width=2, color="#f8fafc"),
+    sell_signals = df[sell_series.notna()].copy()
+    if not sell_signals.empty:
+        sell_signal_types = sell_signals["sell_signal_type"] if "sell_signal_type" in sell_signals.columns else pd.Series("EXIT_SIGNAL", index=sell_signals.index)
+        sell_marker_x = [df.loc[index, "timestamp"] for index in sell_signals.index]
+        sell_marker_y = [df.loc[index, "high"] * 1.006 for index in sell_signals.index]
+        hard_stop_mask = sell_signal_types.eq("HARD_STOP")
+        normal_exit_mask = ~hard_stop_mask
+
+        if normal_exit_mask.any():
+            normal_sell_signals = sell_signals.loc[normal_exit_mask]
+            normal_customdata = normal_sell_signals[["timestamp", "sell_signal"]].to_numpy()
+            fig.add_trace(
+                go.Scattergl(
+                    x=[x for x, keep in zip(sell_marker_x, normal_exit_mask.tolist()) if keep],
+                    y=[y for y, keep in zip(sell_marker_y, normal_exit_mask.tolist()) if keep],
+                    customdata=normal_customdata,
+                    mode="markers",
+                    name="Long Exit",
+                    marker=dict(
+                        symbol="triangle-down",
+                        size=22,
+                        color="#38bdf8",
+                        line=dict(width=3, color="#020617"),
+                    ),
+                    text=["做多出场"] * len(normal_sell_signals),
+                    textposition="top center",
+                    textfont=dict(size=12, color="#38bdf8"),
+                    hovertemplate=(
+                        "LONG EXIT<br>"
+                        "标记K线: %{x}<br>"
+                        "信号K线: %{customdata[0]}<br>"
+                        "出场价: %{customdata[1]:.2f}<extra></extra>"
+                    ),
                 ),
-                hovertemplate="SELL<br>%{x}<br>%{y:.2f}<extra></extra>",
-            ),
-            row=1,
-            col=1,
-        )
-    if not hard_stop_signals.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=hard_stop_signals["timestamp"],
-                y=hard_stop_signals["high"] * 1.008,
-                mode="markers",
-                name="HARD_STOP",
-                marker=dict(
-                    symbol="triangle-down",
-                    size=16,
-                    color="#ef4444",
-                    line=dict(width=2, color="#f8fafc"),
+                row=1,
+                col=1,
+                secondary_y=False,
+            )
+
+        if hard_stop_mask.any():
+            hard_stop_signals = sell_signals.loc[hard_stop_mask]
+            hard_stop_customdata = hard_stop_signals[["timestamp", "sell_signal"]].to_numpy()
+            fig.add_trace(
+                go.Scattergl(
+                    x=[x for x, keep in zip(sell_marker_x, hard_stop_mask.tolist()) if keep],
+                    y=[y for y, keep in zip(sell_marker_y, hard_stop_mask.tolist()) if keep],
+                    customdata=hard_stop_customdata,
+                    mode="markers",
+                    name="Hard Stop",
+                    marker=dict(
+                        symbol="triangle-down",
+                        size=22,
+                        color="#ef4444",
+                        line=dict(width=3, color="#020617"),
+                    ),
+                    text=["硬止损出场"] * len(hard_stop_signals),
+                    textposition="top center",
+                    textfont=dict(size=12, color="#ef4444"),
+                    hovertemplate=(
+                        "HARD STOP<br>"
+                        "标记K线: %{x}<br>"
+                        "信号K线: %{customdata[0]}<br>"
+                        "出场价: %{customdata[1]:.2f}<extra></extra>"
+                    ),
                 ),
-                hovertemplate="HARD_STOP<br>%{x}<br>%{y:.2f}<extra></extra>",
-            ),
-            row=1,
-            col=1,
-        )
+                row=1,
+                col=1,
+                secondary_y=False,
+            )
 
     volume_colors = np.where(df["close"] >= df["open"], increasing_color, decreasing_color)
     fig.add_trace(
@@ -180,8 +276,9 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
         height=920,
         hovermode="x unified",
         dragmode="pan",
-        margin=dict(t=28, b=28, l=54, r=28),
+        margin=dict(t=28, b=28, l=54, r=54),
         xaxis_rangeslider_visible=False,
+        transition=dict(duration=0),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -225,11 +322,23 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
         row=2,
         col=1,
     )
+
     fig.update_yaxes(
         showgrid=True,
         gridcolor=grid_color,
         tickfont=dict(color=text_color, size=11),
         side="right",
+        secondary_y=False,
+        row=1,
+        col=1,
+    )
+    fig.update_yaxes(
+        showgrid=False,
+        zeroline=True,
+        zerolinecolor="rgba(251, 191, 36, 0.2)",
+        tickfont=dict(color="#fbbf24", size=11),
+        side="left",
+        secondary_y=True,
         row=1,
         col=1,
     )
@@ -242,12 +351,12 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
         col=1,
     )
 
-    total_trades = _safe_metric(backtest_report, "总交易次数", "鎬讳氦鏄撴鏁?", default=0)
-    win_rate = _safe_metric(backtest_report, "胜率", "鑳滅巼", default="0%")
-    net_profit = _safe_metric(backtest_report, "累计净收益率", "绱鍑€鏀剁泭鐜?", default="0%")
-    profit_abs = _safe_metric(backtest_report, "总绝对利润", "鎬荤粷瀵瑰埄娑?", default=0)
-    rr_ratio = _safe_metric(backtest_report, "盈亏比", "鐩堜簭姣?", default=0)
-    max_dd = _safe_metric(backtest_report, "最大回撤", "鏈€澶у洖鎾?", default="0%")
+    total_trades = _safe_metric(backtest_report, "总交易次数", default=0)
+    win_rate = _safe_metric(backtest_report, "胜率", default="0%")
+    net_profit = _safe_metric(backtest_report, "总净利润", default="0")
+    avg_profit = _safe_metric(backtest_report, "平均盈亏", default=0)
+    rr_ratio = _safe_metric(backtest_report, "盈亏比", default=0)
+    max_dd = _safe_metric(backtest_report, "最大回撤(USD)", default="0")
 
     last_close = float(df["close"].iloc[-1]) if not df.empty else 0.0
     price_change = float(df["close"].iloc[-1] - df["close"].iloc[-2]) if len(df) > 1 else 0.0
@@ -261,7 +370,7 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
           <div class="eyebrow">Strategy Dashboard</div>
           <div class="symbol-row">
             <div class="symbol">BTC/USDT</div>
-            <div class="venue">Perp-style Backtest Panel</div>
+            <div class="venue">Fixed 1 BTC Base / Auto PnL</div>
           </div>
         </div>
         <div class="live-price-block">
@@ -281,19 +390,19 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
           <div class="metric-value">{win_rate}</div>
         </div>
         <div class="metric-card accent-amber">
-          <div class="metric-label">Net Return</div>
+          <div class="metric-label">Total PnL (USD)</div>
           <div class="metric-value">{net_profit}</div>
         </div>
         <div class="metric-card accent-blue">
-          <div class="metric-label">Profit USD</div>
-          <div class="metric-value">{profit_abs}</div>
+          <div class="metric-label">Avg Trade (USD)</div>
+          <div class="metric-value">{avg_profit}</div>
         </div>
         <div class="metric-card accent-violet">
           <div class="metric-label">P/L Ratio</div>
           <div class="metric-value">{rr_ratio}</div>
         </div>
         <div class="metric-card accent-red">
-          <div class="metric-label">Max Drawdown</div>
+          <div class="metric-label">Max DD (USD)</div>
           <div class="metric-value">{max_dd}</div>
         </div>
       </div>
@@ -432,10 +541,6 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
 
 
 def backtest_long_refined(df_4h, fee_rate=0.0004):
-    """
-    完善后的指标计算方法
-    fee_rate: 单边手续费，默认万四
-    """
     position_queue = []
     trades = []
 
@@ -447,70 +552,118 @@ def backtest_long_refined(df_4h, fee_rate=0.0004):
             position_queue.append({
                 "entry_price": buy_price,
                 "entry_time": idx,
+                "position_size": 1.0,
             })
 
         if pd.notna(sell_price) and sell_price > 0:
             while position_queue:
                 trade_info = position_queue.pop(0)
                 entry_price = trade_info["entry_price"]
-                gross_return = (sell_price - entry_price) / entry_price
-                net_return = gross_return - (fee_rate * 2)
-                profit_abs = sell_price - entry_price
+                position_size = trade_info["position_size"]
+
+                gross_profit_usd = (sell_price - entry_price) * position_size
+                fee_usd = (entry_price + sell_price) * fee_rate * position_size
+                net_profit_usd = gross_profit_usd - fee_usd
 
                 trades.append({
                     "entry_time": trade_info["entry_time"],
                     "exit_time": idx,
                     "entry_price": entry_price,
                     "exit_price": sell_price,
-                    "net_return": net_return,
-                    "profit_abs": profit_abs,
+                    "position_size": position_size,
+                    "profit_abs": net_profit_usd,
                 })
 
     if not trades:
         return {
             "总交易次数": 0,
             "胜率": "0%",
-            "累计净收益率": "0%",
-            "总绝对利润": 0,
+            "总净利润": "0.00",
+            "平均盈亏": 0,
             "盈亏比": 0,
-            "最大回撤": "0%",
+            "最大回撤(USD)": "0.00",
         }
 
     trades_df = pd.DataFrame(trades)
-    win_rate = (trades_df["net_return"] > 0).mean()
-    cum_return = (1 + trades_df["net_return"]).prod() - 1
-    wins = trades_df[trades_df["net_return"] > 0]["net_return"]
-    losses = trades_df[trades_df["net_return"] <= 0]["net_return"].abs()
-    rr = (wins.mean() / losses.mean()) if not losses.empty and losses.mean() != 0 else 0
-    equity_curve = (1 + trades_df["net_return"]).cumprod()
-    peak = equity_curve.cummax()
-    drawdown = (equity_curve - peak) / peak
-    max_dd = drawdown.min()
+    win_rate = (trades_df["profit_abs"] > 0).mean()
+    wins = trades_df[trades_df["profit_abs"] > 0]["profit_abs"]
+    losses = trades_df[trades_df["profit_abs"] <= 0]["profit_abs"].abs()
+    avg_win = wins.mean() if not wins.empty else 0
+    avg_loss = losses.mean() if not losses.empty else 0
+    rr = (avg_win / avg_loss) if avg_loss != 0 else 0
+    trades_df["equity"] = trades_df["profit_abs"].cumsum()
+    total_net_profit = trades_df["profit_abs"].sum()
+    peak = trades_df["equity"].cummax()
+    drawdown_usd = trades_df["equity"] - peak
+    max_dd_usd = drawdown_usd.min()
 
     return {
         "总交易次数": len(trades_df),
         "胜率": f"{win_rate:.2%}",
-        "累计净收益率": f"{'+' if cum_return > 0 else ''}{cum_return:.2%}",
-        "总绝对利润": round(trades_df["profit_abs"].sum(), 2),
+        "总净利润": f"{total_net_profit:,.2f}",
+        "平均盈亏": round(trades_df["profit_abs"].mean(), 2),
         "盈亏比": round(rr, 2),
-        "最大回撤": f"{max_dd:.2%}",
+        "最大回撤(USD)": f"{max_dd_usd:,.2f}",
         "trades_df": trades_df,
     }
 
 
+def format_trades_table(trades_df):
+    columns = ["序号", "入场时间", "出场时间", "入场价格", "出场价格", "净利润(USD)"]
+    rows = []
+    for number, row in enumerate(trades_df.itertuples(index=False), start=1):
+        rows.append(
+            [
+                str(number),
+                str(row.entry_time),
+                str(row.exit_time),
+                f"{float(row.entry_price):.2f}",
+                f"{float(row.exit_price):.2f}",
+                f"{float(row.profit_abs):.2f}",
+            ]
+        )
+
+    widths = [
+        max(display_width(column), *(display_width(row[index]) for row in rows))
+        for index, column in enumerate(columns)
+    ]
+    separator = "-+-".join("-" * width for width in widths)
+    lines = [
+        " | ".join(pad_display_width(column, widths[index]) for index, column in enumerate(columns)),
+        separator,
+    ]
+    for row in rows:
+        lines.append(" | ".join(pad_display_width(value, widths[index]) for index, value in enumerate(row)))
+    return "\n".join(lines)
+
+
+def display_width(value):
+    text = str(value)
+    return sum(2 if ord(char) > 127 else 1 for char in text)
+
+
+def pad_display_width(value, width):
+    text = str(value)
+    return text + (" " * max(width - display_width(text), 0))
+
+
 if __name__ == "__main__":
-    import sys
+    four_path = "backtest_result_long_signals.xlsx"
+    if os.path.exists(four_path):
+        df_4h = pd.read_excel(four_path)
+        df_4h.set_index("timestamp", inplace=True)
 
-    four_path = sys.argv[1] if len(sys.argv) > 1 else "backtest_result_long_with_signals.xlsx"
-    output_name = sys.argv[2] if len(sys.argv) > 2 else "strategy_backtest_dashboard_long.html"
-    df_4h = pd.read_excel(four_path)
-    df_4h.set_index("timestamp", inplace=True)
+        report_stats = backtest_long_refined(df_4h)
+        generate_interactive_html_with_dashboard(df_4h, report_stats)
 
-    report_stats = backtest_long_refined(df_4h)
-    generate_interactive_html_with_dashboard(df_4h, report_stats, output_name=output_name)
-
-    print("\n" + "=" * 30)
-    print("BTC 近3年自动化回测报告")
-    print("=" * 30)
-    for key, value in report_stats.items():
-        print(f"{key}: {value}")
+        print("\n" + "=" * 40)
+        print("BTC 每次固定 1 BTC 回测报告 (绝对金额)")
+        print("=" * 40)
+        for key, value in report_stats.items():
+            if key == "trades_df":
+                print("\n交易明细:")
+                print(format_trades_table(value))
+            else:
+                print(f"{key}: {value}")
+    else:
+        logger.warning(f"数据文件 {four_path} 不存在。请准备好该文件后运行脚本。")

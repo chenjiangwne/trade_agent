@@ -78,13 +78,15 @@ def backtest():
                 current_df_daily = df_daily[pd.to_datetime(df_daily['timestamp']) <= current_4h_close_time].copy()
                 logger.debug(f"this is {i} after handle:1h is \n{current_df_1h}, 4h is \n{current_df_4h}, daily is \n{current_df_daily}")
                 # 执行打分：务必传入切片！
-                result, total_scores,metrics = testsuite_result(current_df_1h, current_df_4h, current_df_daily)
+                result, total_scores, parameters = testsuite_result(current_df_1h, current_df_4h, current_df_daily)
+                metrics = parameters.get("metric_str", "") if isinstance(parameters, dict) else parameters
+                parameters_log = parameters if isinstance(parameters, dict) else {"metric_str": parameters}
                 if result!=Res['OK']:
                     logger.debug(f"{result} total_scores is {total_scores}")
-                    logger.error(f"---NOK! Attempt>>{i}<<success,The case failed to occur,Please check log---")
+                    logger.error(f"---NOK! Attempt>>{i}<<success,The case failed to occur, parameters={parameters_log}, Please check log---")
                     break
                 else:
-                    logger.warning(f"---Index:{i+1} | Score:{total_scores} | {metrics}  ---")
+                    logger.warning(f"---Index:{i+1} | Score:{total_scores} | parameters={parameters_log} | metric_str={metrics}  ---")
                 required_entry_score = buypoint
                 if state == Res['position'] and last_entry_score is not None:
                     required_entry_score = float(last_entry_score) + float(buypoint_step)
@@ -209,7 +211,7 @@ def backtest():
             loop_logger.info(f"----ending excu strateg for {i+1} interration----")
         
         
-        save_path = "backtest_result_with_signals.xlsx"
+        save_path = "backtest_result_short_signals.xlsx"
         df_4h.to_excel(save_path, index=False)
         logger.info(f"回测结果已保存至: {save_path}")
 

@@ -565,13 +565,11 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
 
 def backtest_short_refined(df_4h, fee_rate=0.0004):
     """
-    完善后的指标计算方法 (基准 1 BTC，连续两单亏损后下一单每次递减 0.2 BTC，绝对金额统计)
+    完善后的指标计算方法 (固定 1 BTC 模型，绝对金额统计)
     fee_rate: 单边手续费，默认万四
     """
     position_queue = []
     trades = []
-    consecutive_losses = 0
-    current_position_size = 1.0
 
     for idx, row in df_4h.iterrows():
         buy_price = row.get("buy_signal")
@@ -582,7 +580,6 @@ def backtest_short_refined(df_4h, fee_rate=0.0004):
             position_queue.append({
                 "entry_price": buy_price,
                 "entry_time": idx,
-                "position_size": current_position_size,
             })
 
         # 做空平仓
@@ -590,10 +587,10 @@ def backtest_short_refined(df_4h, fee_rate=0.0004):
             while position_queue:
                 trade_info = position_queue.pop(0)
                 entry_price = trade_info["entry_price"]
-                position_size = trade_info["position_size"]
-
-                gross_profit_usd = (entry_price - sell_price) * position_size
-                fee_usd = (entry_price + sell_price) * fee_rate * position_size
+                
+                # --- 固定 1 BTC 的绝对金额计算 ---
+                gross_profit_usd = entry_price - sell_price 
+                fee_usd = (entry_price + sell_price) * fee_rate 
                 net_profit_usd = gross_profit_usd - fee_usd
 
                 trades.append({
@@ -601,43 +598,32 @@ def backtest_short_refined(df_4h, fee_rate=0.0004):
                     "exit_time": idx,
                     "entry_price": entry_price,
                     "exit_price": sell_price,
-                    "position_size": position_size,
-                    "profit_abs": net_profit_usd,
+                    "profit_abs": net_profit_usd, 
                 })
 
-                if net_profit_usd < 0:
-                    consecutive_losses += 1
-                else:
-                    consecutive_losses = 0
-
-                if consecutive_losses >= 2:
-                    step_count = consecutive_losses - 1
-                    current_position_size = max(0.0, 1.0 - 0.2 * step_count)
-                else:
-                    current_position_size = 1.0
-
     if not trades:
-        return {
-            "总交易次数": 0, "胜率": "0%", "总净利润": "0.00",
+        return {{
+            "总交易次数": 0, "胜率": "0%", "总净利润": "0.00", 
             "平均盈亏": 0, "盈亏比": 0, "最大回撤(USD)": "0.00",
-        }
+        }}
 
     trades_df = pd.DataFrame(trades)
-
+    
     win_rate = (trades_df["profit_abs"] > 0).mean()
-
+    
     wins = trades_df[trades_df["profit_abs"] > 0]["profit_abs"]
     losses = trades_df[trades_df["profit_abs"] <= 0]["profit_abs"].abs()
     avg_win = wins.mean() if not wins.empty else 0
     avg_loss = losses.mean() if not losses.empty else 0
     rr = (avg_win / avg_loss) if avg_loss != 0 else 0
-
+    
+    # 累计盈亏曲线 (起点为0，逐笔累加)
     trades_df["equity"] = trades_df["profit_abs"].cumsum()
-
+    
     total_net_profit = trades_df["profit_abs"].sum()
-
+    
     peak = trades_df["equity"].cummax()
-    drawdown_usd = trades_df["equity"] - peak
+    drawdown_usd = trades_df["equity"] - peak 
     max_dd_usd = drawdown_usd.min()
 
     return {

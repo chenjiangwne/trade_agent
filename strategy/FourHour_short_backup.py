@@ -4,26 +4,23 @@ import time
 from loguru import logger
 import pandas as pd
 import numpy as np
-
+from typing import Any
 Res = {"OK": 0, "ERR": -1, "EXCEPTION": -2}
-
 class StrategyResult(Enum):
     WAIT = "WAIT"
     LONG = "LONG"
     SHORT = "SHORT"
     EXIT = "EXIT"
     ERROR = "ERROR"
-
 @dataclass
 class Monitor:
     StrategyResult: StrategyResult
     metric: str
     score: int
     timestamp: int
-
+    fallback_value: float = 0.0
 def _now_ts():
     return int(time.time() * 1000)
-
 def _calc_boll(df, window=20, std_mul=2):
     df = df.copy()
     df["bb_mid"] = df["close"].rolling(window=window).mean()
@@ -31,7 +28,6 @@ def _calc_boll(df, window=20, std_mul=2):
     df["bb_upper"] = df["bb_mid"] + std_mul * df["bb_std"]
     df["bb_lower"] = df["bb_mid"] - std_mul * df["bb_std"]
     return df
-
 def _calc_macd(close, fast=12, slow=26, signal=9):
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
@@ -39,7 +35,6 @@ def _calc_macd(close, fast=12, slow=26, signal=9):
     dea = dif.ewm(span=signal, adjust=False).mean()
     hist = dif - dea
     return dif, dea, hist
-
 def _calc_rsi(close, period=14):
     delta = close.diff()
     gain = delta.clip(lower=0)
@@ -48,7 +43,6 @@ def _calc_rsi(close, period=14):
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
     rs = avg_gain / (avg_loss + 1e-9)
     return 100 - (100 / (1 + rs))
-
 def _calc_atr(df, period=14):
     high = df["high"]
     low = df["low"]
@@ -59,7 +53,6 @@ def _calc_atr(df, period=14):
         (low - close.shift()).abs()
     ], axis=1).max(axis=1)
     return tr.rolling(period).mean()
-
 def _dynamic_tolerance(df, base_tolerance=0.005, atr_period=14):
     """根据ATR动态调整容忍度"""
     atr = _calc_atr(df, atr_period).iloc[-1]
@@ -68,7 +61,6 @@ def _dynamic_tolerance(df, base_tolerance=0.005, atr_period=14):
         return base_tolerance
     vol_ratio = atr / price
     return max(base_tolerance, min(vol_ratio * 0.5, 0.02))
-
 def _is_near_level(price, level, tolerance=None, df=None):
     if pd.isna(price) or pd.isna(level) or level == 0:
         return False
@@ -78,17 +70,14 @@ def _is_near_level(price, level, tolerance=None, df=None):
         else:
             tolerance = 0.01
     return abs(price - level) / abs(level) <= tolerance
-
 def _in_zone(price, low, high):
     if pd.isna(price) or pd.isna(low) or pd.isna(high):
         return False
     return low <= price <= high
-
 def _find_recent_swing_high(df, lookback=10):
     if df is None or len(df) < lookback:
         return np.nan
     return df["high"].iloc[-lookback:].max()
-
 def _has_hh_hl_structure(df, lookback=20):
     if df is None or len(df) < lookback:
         return False
@@ -102,7 +91,6 @@ def _has_hh_hl_structure(df, lookback=20):
     if pd.isna(highs_0) or pd.isna(highs_1) or pd.isna(lows_0) or pd.isna(lows_1):
         return False
     return highs_1 > highs_0 and lows_1 > lows_0
-
 def _calc_fib_retracement_zone(df_4h, lookback=60):
     if df_4h is None or len(df_4h) < lookback:
         return None
@@ -122,7 +110,6 @@ def _calc_fib_retracement_zone(df_4h, lookback=60):
         "swing_high": swing_high,
         "swing_low": swing_low
     }
-
 def _calc_range_position(df, lookback=40):
     if df is None or len(df) < lookback:
         return np.nan
@@ -133,7 +120,6 @@ def _calc_range_position(df, lookback=40):
     if pd.isna(range_low) or pd.isna(range_high) or range_high <= range_low:
         return np.nan
     return (current_price - range_low) / (range_high - range_low + 1e-9)
-
 def _find_local_swing_points(df, left=2, right=2):
     if df is None or len(df) < left + right + 5:
         return [], []
@@ -147,7 +133,6 @@ def _find_local_swing_points(df, left=2, right=2):
         if l[i] == min(l[i-left:i+right+1]):
             lows.append((i, l[i]))
     return highs, lows
-
 def _calc_rebound_pct(df_4h, lookback=20):
     if df_4h is None or len(df_4h) < lookback:
         return np.nan
@@ -160,7 +145,6 @@ def _calc_rebound_pct(df_4h, lookback=20):
     total_range = (high - low) / low
     rebound_pct = (close - low) / low
     return rebound_pct
-
 # =========================================================
 # 1. 日线空头背景
 # =========================================================
@@ -205,14 +189,13 @@ def eval_short_background(df_daily, df_4h):
             StrategyResult=action,
             metric=" | ".join(metrics),
             score=min(score, 25),
-            timestamp=_now_ts()
-        )
+            timestamp=_now_ts(),
+            fallback_value=0.0)
     except Exception as e:
         logger.error(f"eval_short_background error: {e}")
         return Res["ERR"], None
-
 # =========================================================
-# 2. 阻力区共振（动态容忍度）
+# 2. 阻力区共振（动态容忍度）35分满分，18分空单条件，20分高位压力共振区
 # =========================================================
 def eval_short_resistance_zone(df_daily, df_4h):
     res = Res["OK"]
@@ -229,7 +212,6 @@ def eval_short_resistance_zone(df_daily, df_4h):
         metrics = []
         daily_hit = 0
         h4_hit = 0
-
         atr_ratio = _calc_atr(h4, 14).iloc[-1] / current_price if current_price > 0 else 0.01
         top_threshold = 0.75 if atr_ratio < 0.02 else 0.80
         range_pos = _calc_range_position(h4, lookback=50)
@@ -238,88 +220,74 @@ def eval_short_resistance_zone(df_daily, df_4h):
             metrics.append(f"当前位于最近4H区间顶部 pos={round(range_pos, 3)} (动态阈>{top_threshold}) (+10)")
         else:
             metrics.append(f"未到4H顶部区域 pos={round(range_pos, 3) if not pd.isna(range_pos) else 'nan'} (+0)")
-
         rebound_pct = _calc_rebound_pct(h4, lookback=24)
         if not pd.isna(rebound_pct) and rebound_pct >= 0.03:
             score += 4
             metrics.append(f"最近4H已有反弹 rebound={round(rebound_pct * 100, 2)}% (+4)")
         else:
             metrics.append(f"反弹不足 rebound={round(rebound_pct * 100, 2) if not pd.isna(rebound_pct) else 'nan'}% (+0)")
-
         daily_prev_high = d["high"].iloc[-90:-1].max()
         if _is_near_level(current_price, daily_prev_high, df=h4):
             score += 8
             daily_hit += 1
             metrics.append("接近日线前高压力 (+8)")
-
         if _is_near_level(current_price, last_d["bb_upper"], df=h4):
             score += 8
             daily_hit += 1
             metrics.append("接近日线BOLL上轨 (+8)")
-
         h4_prev_high = h4["high"].iloc[-60:-1].max()
         if _is_near_level(current_price, h4_prev_high, df=h4):
             score += 5
             h4_hit += 1
             metrics.append("接近4H前高压力 (+5)")
-
         h4_platform_high = h4["high"].iloc[-40:-10].max()
         if _is_near_level(current_price, h4_platform_high, df=h4):
             score += 4
             h4_hit += 1
             metrics.append("接近4H平台上沿 (+4)")
-
         if _is_near_level(current_price, last_4h["bb_upper"], df=h4):
             score += 4
             h4_hit += 1
             metrics.append("接近4H BOLL上轨 (+4)")
-
         fib_info = _calc_fib_retracement_zone(h4, lookback=80)
         if fib_info is not None and _in_zone(current_price, fib_info["zone_low"], fib_info["zone_high"]):
             score += 4
             h4_hit += 1
             metrics.append("进入4H fib 0.618~0.786回撤区 (+4)")
-
         if daily_hit >= 1:
             score += 4
             metrics.append("命中日线级别压力 (+4)")
         else:
             metrics.append("未命中日线级别压力 (+0)")
-
         if h4_hit >= 1:
             score += 2
             metrics.append("命中4H级别压力 (+2)")
         else:
             metrics.append("未命中4H级别压力 (+0)")
-
         if daily_hit >= 1 and h4_hit >= 2:
             score += 3
             metrics.append("多周期压力强共振 (+3)")
-
         valid_zone = (
             (not pd.isna(range_pos) and range_pos >= top_threshold) and
             (not pd.isna(rebound_pct) and rebound_pct >= 0.03) and
             ((daily_hit >= 1) or (h4_hit >= 2))
         )
-
         action = StrategyResult.WAIT
         if valid_zone and score >= 18:
             action = StrategyResult.SHORT
         else:
             metrics.append("不是高位压力共振区 -> 禁止空")
-
         return res, Monitor(
             StrategyResult=action,
             metric=" | ".join(metrics),
             score=min(score, 35),
-            timestamp=_now_ts()
-        )
+            timestamp=_now_ts(),
+            fallback_value=0.0)
     except Exception as e:
         logger.error(f"eval_short_resistance_zone error: {e}")
         return Res["ERR"], None
-
 # =========================================================
-# 3. 1H触发（成交量过滤 + 4H确认）
+# 3. 1H触发（成交量过滤 + 4H确认）30分满分，18分空单条件，4H确认加分但不强制
 # =========================================================
 def eval_short_trigger_1h(df_1h, df_4h=None):
     res = Res["OK"]
@@ -333,116 +301,121 @@ def eval_short_trigger_1h(df_1h, df_4h=None):
         h1["dif"] = dif
         h1["dea"] = dea
         h1["hist"] = hist
-
         score = 0
         metrics = []
         last = h1.iloc[-1]
         prev = h1.iloc[-2]
-
-        recent = h1.iloc[-40:].copy()
-        swing_highs, swing_lows = _find_local_swing_points(recent, left=2, right=2)
-
+        # =========================
+        # 1️⃣ LH结构（前提）
+        # =========================
+        recent = h1.iloc[-40:]
+        swing_highs, _ = _find_local_swing_points(recent, left=2, right=2)
         lower_high = False
-        break_neckline = False
-        neckline = None
+        strong_lh = False
         if len(swing_highs) >= 2:
-            idx1, high1 = swing_highs[-2]
-            idx2, high2 = swing_highs[-1]
+            high1 = swing_highs[-2][1]
+            high2 = swing_highs[-1][1]
             if high2 <= high1 * 0.998:
                 lower_high = True
-                local_slice = recent.iloc[idx1:idx2 + 1]
-                if len(local_slice) >= 3:
-                    neckline = local_slice["low"].min()
-
-        if lower_high and neckline is not None:
-            if last["close"] < neckline:
-                break_neckline = True
-
-        if not break_neckline:
-            recent_low = h1["low"].iloc[-10:-1].min()
-            if last["close"] < recent_low:
-                break_neckline = True
-
-        if not (lower_high and break_neckline):
-            metric_str = "未形成高位双冲失败+破位结构 -> 不空"
+                if high2 <= high1 * 0.995:
+                    strong_lh = True
+        if not lower_high:
             return res, Monitor(
                 StrategyResult=StrategyResult.WAIT,
-                metric=metric_str,
+                metric="无LH结构",
                 score=0,
-                timestamp=_now_ts()
+                timestamp=_now_ts(),
+                fallback_value=0.0
             )
-
-        # 成交量过滤
-        vol_col = None
-        for col in h1.columns:
-            if 'volume' in col.lower() or 'vol' in col.lower():
-                vol_col = col
-                break
-        if vol_col is not None:
-            avg_vol = h1[vol_col].iloc[-25:-1].mean()
-            if last[vol_col] > avg_vol * 1.2:
-                score += 4
-                metrics.append("破位K线放量 (+4)")
-            else:
-                metrics.append("破位量能不足 (+0)")
-            if len(h1) >= 30:
-                rebound_vol = h1[vol_col].iloc[-15:].mean()
-                prev_vol = h1[vol_col].iloc[-30:-15].mean()
-                if rebound_vol < prev_vol * 0.9:
-                    score += 2
-                    metrics.append("反弹缩量 (+2)")
-
-        # 4H过滤
-        if df_4h is not None and len(df_4h) >= 30:
-            h4_ema20 = df_4h["close"].ewm(span=20, adjust=False).mean().iloc[-1]
-            if last["close"] < h4_ema20:
-                score += 3
-                metrics.append("4H收盘仍在EMA20下方 (+3)")
-            else:
-                metrics.append("4H已站上EMA20，逆大周期风险 (+0)")
-
-        score += 10
-        metrics.append("1H二次冲高不过前高(LH) (+10)")
-        score += 10
-        metrics.append("1H跌破双顶中间低点/最近摆动低点 (+10)")
-
+        if strong_lh:
+            score += 6
+            metrics.append("强LH (+6)")
+        else:
+            score += 3
+            metrics.append("弱LH (+3)")
+        # =========================
+        # 2️⃣ 连续转弱确认（🔥关键）
+        # =========================
+        if prev["close"] < prev["ema20"] and last["close"] < last["ema20"]:
+            score += 4
+            metrics.append("连续跌破EMA20 (+4)")
+        if last["hist"] < 0:
+            score += 2
+            metrics.append("MACD转弱 (+2)")
+        # =========================
+        # 3️⃣ rejection（顶部失败）
+        # =========================
         if "open" in h1.columns:
             body = abs(last["close"] - last["open"])
             upper_shadow = last["high"] - max(last["close"], last["open"])
-            if upper_shadow > body * 1.2 and last["close"] < last["open"]:
+            if upper_shadow > body * 1.5 and last["close"] < last["open"]:
+                score += 3
+                metrics.append("冲高回落 (+3)")
+        # =========================
+        # 4️⃣ 假突破（强信号）
+        # =========================
+        if len(swing_highs) >= 2:
+            if last["high"] > high1 and last["close"] < high1:
+                score += 4
+                metrics.append("假突破失败 (+4)")
+        # =========================
+        # 5️⃣ 破位（加分，不强制）
+        # =========================
+        recent_low = h1["low"].iloc[-10:-1].min()
+        if last["close"] < recent_low:
+            score += 5
+            metrics.append("跌破近期低点 (+5)")
+        # =========================
+        # 6️⃣ 成交量
+        # =========================
+        vol_col = None
+        for col in h1.columns:
+            if "volume" in col.lower() or "vol" in col.lower():
+                vol_col = col
+                break
+        if vol_col:
+            avg_vol = h1[vol_col].iloc[-25:-1].mean()
+            if last[vol_col] > avg_vol * 1.2:
                 score += 2
-                metrics.append("1H冲高回落 (+2)")
-
-        if "open" in h1.columns:
-            if (prev["close"] > prev["open"] and
-                last["close"] < last["open"] and
-                last["open"] >= prev["close"] and
-                last["close"] <= prev["open"]):
+                metrics.append("放量 (+2)")
+        # =========================
+        # 7️⃣ 反包否定（🔥关键）
+        # =========================
+        if last["close"] > prev["high"]:
+            score -= 5
+            metrics.append("被阳线反包 (-5)")
+        # =========================
+        # 8️⃣ 位置过滤（🔥关键）
+        # =========================
+        if df_4h is not None:
+            pos = _calc_range_position(df_4h, lookback=40)
+            if not pd.isna(pos):
+                if pos < 0.6:
+                    score -= 3
+                    metrics.append("位置不高 (-3)")
+                elif pos > 0.8:
+                    score += 2
+                    metrics.append("高位区域 (+2)")
+        # =========================
+        # 9️⃣ 4H趋势（轻权重）
+        # =========================
+        if df_4h is not None and len(df_4h) >= 30:
+            h4_ema20 = df_4h["close"].ewm(span=20).mean().iloc[-1]
+            if last["close"] < h4_ema20:
                 score += 2
-                metrics.append("1H阴包阳 (+2)")
-
-        if last["dif"] < last["dea"] and prev["dif"] >= prev["dea"]:
-            score += 2
-            metrics.append("1H MACD死叉 (+2)")
-        elif last["hist"] < 0 and prev["hist"] >= 0:
-            score += 2
-            metrics.append("1H MACD转绿 (+2)")
-
-        if last["close"] < last["ema20"]:
-            score += 1
-            metrics.append("1H跌回EMA20下方 (+1)")
-
+                metrics.append("顺4H趋势 (+2)")
+            else:
+                score -= 2
+                metrics.append("逆4H (-2)")
         return res, Monitor(
             StrategyResult=StrategyResult.SHORT,
             metric=" | ".join(metrics),
             score=min(score, 30),
-            timestamp=_now_ts()
-        )
+            timestamp=_now_ts(),
+            fallback_value=0.0)
     except Exception as e:
         logger.error(f"eval_short_trigger_1h error: {e}")
         return Res["ERR"], None
-
-# =========================================================
 # 4. 风险评分
 # =========================================================
 def eval_short_risk(df_1h, df_4h):
@@ -494,8 +467,8 @@ def eval_short_risk(df_1h, df_4h):
             StrategyResult=action,
             metric=" | ".join(metrics),
             score=min(score, 15),
-            timestamp=_now_ts()
-        )
+            timestamp=_now_ts(),
+            fallback_value={round(stop_loss, 4)})
     except Exception as e:
         logger.error(f"eval_short_risk error: {e}")
         return Res["ERR"], None
@@ -508,23 +481,21 @@ def eval_exit(df_1h, df_4h, current_price, initial_stop, current_rr, peak_rr, re
         ema20 = df_1h["close"].ewm(span=20, adjust=False).mean()
         atr = _calc_atr(df_4h, period=14).iloc[-1]
         rsi = _calc_rsi(df_1h["close"], period=14)
-
         action = StrategyResult.WAIT
         metric = "继续持有空单"
-
         # 1. 绝对硬止损：亏损达到 3% 无条件斩仓 (做空亏损时 return_pct 为负数)
         hard_stop_loss_pct = -0.03
         if return_pct <= hard_stop_loss_pct:
             action = StrategyResult.EXIT
             metric = f"止损: 触发 3% 硬止损 (当前收益率: {return_pct*100:.2f}%)"
-            return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts())
-
+            return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts(),
+                fallback_value=0.0)
         # 2. 初始结构止损：价格突破了建仓时设定的最高防守线
         if current_price >= initial_stop:
             action = StrategyResult.EXIT
             metric = f"止损: 突破初始结构止损位 ({initial_stop:.2f})"
-            return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts())
-
+            return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts(),
+                fallback_value=0.0)
         # 3. 移动止盈 (Trailing Stop) 核心逻辑优化
         # 只有在产生足够的浮盈 (比如达到过 1.5R 以上) 才启动，否则很容易被震荡扫掉
         if peak_rr >= 1.5:
@@ -535,18 +506,16 @@ def eval_exit(df_1h, df_4h, current_price, initial_stop, current_rr, peak_rr, re
                 atr_mult = 1.5
             else:
                 atr_mult = 2.0
-
             # 修复版做空追踪止损：
             # 找过去 12 根 K 线的最低点，加上 ATR。因为是做空，止损线是跟着价格往下移的。
             recent_lowest_low = df_1h["low"].rolling(12).min().iloc[-1]
             trailing_stop = recent_lowest_low + (atr_mult * atr)
-
             # 如果反弹突破了移动止盈线，且当前依然有一定利润（例如 current_rr > 0.5 确保不是在亏本砍仓）
             if current_price >= trailing_stop and current_rr > 0.5:
                 action = StrategyResult.EXIT
                 metric = f"止盈: 触发移动追踪止损 (Peak RR: {peak_rr:.2f}, Stop: {trailing_stop:.2f})"
-                return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts())
-
+                return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts(),
+                fallback_value=0.0)
         # 4. 趋势破坏判定 (EMA)
         # 如果浮盈不到 1.5R 甚至还在浮亏，靠 EMA 来兜底
         if peak_rr < 1.5:
@@ -554,29 +523,28 @@ def eval_exit(df_1h, df_4h, current_price, initial_stop, current_rr, peak_rr, re
             if current_price > ema20.iloc[-1] and ema20.iloc[-1] > ema20.iloc[-2]:
                 action = StrategyResult.EXIT
                 metric = f"退出: 1H 趋势破坏 (价格站上上拐的 EMA20)"
-                return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts())
-
-        return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts())
-
+                return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts(),
+                fallback_value=0.0)
+        return Res["OK"], Monitor(StrategyResult=action, metric=metric, score=0, timestamp=_now_ts(),
+                fallback_value=0.0)
     except Exception as e:
         logger.error(f"eval_exit_short error: {e}")
         return Res["ERR"], None
-
-
 def testsuite_result(df_1h,df_4h,df_daily):
     res = Res["OK"]
     total_score = 0
     metrics = []
+    risk_stop_price = []
+    parameters: dict[str, Any] = {}
     try:
         res_bg, background = eval_short_background(df_daily, df_4h)
         res_zone, zone = eval_short_resistance_zone(df_daily, df_4h)
         if res_bg != Res["OK"] or background is None:
             logger.error("NOK! eval_short_background failed")
-            return Res["ERR"], total_score, None
+            return Res["ERR"], total_score, parameters
         if res_zone != Res["OK"] or zone is None:
             logger.error("NOK! eval_short_resistance_zone failed")
-            return Res["ERR"], total_score, None
-
+            return Res["ERR"], total_score, parameters
         if background.score >= 14 and zone.score >= 20:
             if background.score >= 22:
                 bg_base_score = 4
@@ -586,15 +554,15 @@ def testsuite_result(df_1h,df_4h,df_daily):
                 bg_base_score = 2
             else:
                 bg_base_score = 1
-
             test_cases = {
                 "eval_short_background_base": (
                     Res["OK"],
                     Monitor(
                         StrategyResult=StrategyResult.SHORT,
-                        metric=f"背景前置通过，给予背景基准分 (+{bg_base_score})",
+                        metric=f"?????????????? (+{bg_base_score})",
                         score=bg_base_score,
-                        timestamp=_now_ts()
+                        timestamp=_now_ts(),
+                        fallback_value=0.0
                     )
                 ),
                 "eval_short_resistance_zone": (res_zone, zone),
@@ -605,19 +573,20 @@ def testsuite_result(df_1h,df_4h,df_daily):
                 logger.info(f"test_case:{name} -> execute Result is>> {result}, detail: {monitor}")
                 if result != Res["OK"] or monitor is None:
                     logger.error(f"NOK! {name} execute failed")
-                    return Res["ERR"], total_score, None
+                    return Res["ERR"], total_score, parameters
                 total_score += monitor.score
                 metrics.append(f"[{name}] {monitor.metric}")
+                risk_stop_price.append(f"[{name}] {monitor.fallback_value}")
             metric_str = " | ".join(metrics)
-            return res, total_score, metric_str
+            parameters["metric_str"] = metric_str
+            parameters["risk_stop_price"] = risk_stop_price
+            return res, total_score, parameters
         else:
             logger.warning("NOK! preconditions are not met!")
-            return res, total_score, None
+            return res, total_score, parameters
     except Exception as e:
         logger.error(f"NOK! testsuite_short_result err:{e}")
-        return Res["ERR"], total_score, None
-
-
+        return Res["ERR"], total_score, parameters
 def _find_recent_swing_high(df, lookback=10):
     """
     寻找近期 N 根 K 线的最高点 (摆动高点)
@@ -627,8 +596,6 @@ def _find_recent_swing_high(df, lookback=10):
         
     # 直接在 'high' 列中截取最后 lookback 行，并求最大值
     return df["high"].iloc[-lookback:].max()
-
-
 def _calc_atr(df, period=14):
     """
     计算 ATR (平均真实波动幅度)
@@ -649,7 +616,6 @@ def _calc_atr(df, period=14):
     
     # 对 TR 进行 period 周期的移动平均，得出 ATR
     return tr.rolling(period).mean()
-
 def calc_short_performance(entry_price, current_price, stop_loss_price=None):
     """
     计算做空仓位的表现 (收益率与盈亏比)
@@ -686,10 +652,8 @@ def calc_short_performance(entry_price, current_price, stop_loss_price=None):
         "return_pct": return_pct,
         "rr": rr
     }
-
 # # --- 使用示例 ---
 # # 假设你在 70000 建仓做空，止损放在 72100 (风险约 3%)，现在跌到了 65000
 # result = calc_short_performance(entry_price=70000, current_price=65000, stop_loss_price=72100)
-
 # print(f"当前收益率: {result['return_pct'] * 100:.2f}%")  # 输出: 7.14%
 # print(f"当前盈亏比 (RR): {result['rr']:.2f} R")        # 输出: 2.38 R

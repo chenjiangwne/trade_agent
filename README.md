@@ -5,7 +5,9 @@
 ## 会话记录
 
 - 对话 ID: `codex resume 019d8be4-1639-7940-951f-4bb2fd0dfb70`
-run codex resume 019df6d3-0255-70e3-a517-8ce39dd71f08
+codex resume 019df6d3-0255-70e3-a517-8ce39dd71f08
+claude --resume 119fa988-6849-45c7-a59f-59c970b22e50
+claude --resume 38d22454-0e36-4c9a-9ab5-86a3adc0c899
 
 ## 当前能力
 

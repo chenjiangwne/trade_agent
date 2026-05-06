@@ -25,7 +25,9 @@ def make_decision(
 
     if status["position_status"] == "flat":
         logger.info("Initialization strategy environment! Fetching to {}", symbol)
-        result, score, metrics = testsuite_result(df_1h, df_4h, df_daily)
+        result, score, parameters = testsuite_result(df_1h, df_4h, df_daily)
+        metrics = parameters.get("metric_str", "") if isinstance(parameters, dict) else parameters
+        parameters_log = parameters if isinstance(parameters, dict) else {"metric_str": parameters}
         action = "SHORT" if result == Res["OK"] and score >= buypoint else "HOLD"
         metric_text = _normalize_reason(metrics)
         entry_price = float(df_4h.iloc[-1]["close"]) if not df_4h.empty else 0.0
@@ -35,25 +37,28 @@ def make_decision(
 
         if result == Res["OK"] and score >= buypoint:
             logger.success(
-                "--- OK! score={} >= buypoint={}, Execute short entry. initial_stop_price={:.2f}, metrics={} ---",
+                "--- OK! score={} >= buypoint={}, Execute short entry. initial_stop_price={:.2f}, parameters={}, metric_str={} ---",
                 score,
                 buypoint,
                 initial_stop_price,
+                parameters_log,
                 metric_text,
             )
         elif result == Res["OK"]:
             logger.warning(
-                "--- OK! total score={} < buypoint={}, hold this round. metrics={} ---",
+                "--- OK! total score={} < buypoint={}, hold this round. parameters={}, metric_str={} ---",
                 score,
                 buypoint,
+                parameters_log,
                 metric_text,
             )
         else:
             logger.error(
-                "--- NOK! strategy scoring failed, result={}, score={}, buypoint={}, metrics={} ---",
+                "--- NOK! strategy scoring failed, result={}, score={}, buypoint={}, parameters={}, metric_str={} ---",
                 result,
                 score,
                 buypoint,
+                parameters_log,
                 metric_text,
             )
         return {
@@ -72,18 +77,21 @@ def make_decision(
 
     position_state = _build_position_state(status, df_1h, df_4h)
 
-    result, score, metrics = testsuite_result(df_1h, df_4h, df_daily)
+    result, score, parameters = testsuite_result(df_1h, df_4h, df_daily)
+    metrics = parameters.get("metric_str", "") if isinstance(parameters, dict) else parameters
+    parameters_log = parameters if isinstance(parameters, dict) else {"metric_str": parameters}
     metric_text = _normalize_reason(metrics)
     if result == Res["OK"]:
         last_entry_score = float(status.get("last_entry_score", status.get("last_score", buypoint)))
         required_add_score = last_entry_score + buypoint_step
         if float(score) >= required_add_score:
             logger.success(
-                "--- OK! add short enabled: score={} >= required_add_score={} (last_entry_score={} + step={}). metrics={} ---",
+                "--- OK! add short enabled: score={} >= required_add_score={} (last_entry_score={} + step={}). parameters={}, metric_str={} ---",
                 score,
                 required_add_score,
                 last_entry_score,
                 buypoint_step,
+                parameters_log,
                 metric_text,
             )
             return {
@@ -92,7 +100,7 @@ def make_decision(
                 "entry_score": float(score),
                 "bar_time": latest_bar_time,
                 "reason": metric_text,
-                "metrics": metrics if isinstance(metrics, list) else [metric_text],
+                "metrics": [metric_text] if metric_text else [],
                 "status_updates": {
                     "initial_entry_price": position_state["initial_entry_price"],
                     "initial_stop_price": position_state["initial_stop_price"],

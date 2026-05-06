@@ -4,7 +4,7 @@ basic:
   timeframe_1h: 1h
   timeframe_4h: 4h
   timeframe_daily: 1d
-  buypoint: 39
+  buypoint: 13
   buypoint_step: 100
   mode: paper
   max_attempts: 3
@@ -46,6 +46,7 @@ runtime:
   max_clock_diff_seconds: 60
 
 backtest:
+  strategy_mode: long_first_then_short
   eval_exit:
     enabled: true
   eval_execution_15m:
