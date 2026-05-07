@@ -67,24 +67,18 @@ def _switch_clash_node_for_failover(project_root: Path, config: dict[str, Any]) 
         return False
 
 
-def _can_reach_binance(config: dict[str, Any], timeout_ms: int = 8000) -> bool:
+def _can_reach_exchange(config: dict[str, Any], exchange_name: str, timeout_ms: int = 8000) -> bool:
     try:
-        exchange = ccxt.binance(
-            {
-                "enableRateLimit": True,
-                "timeout": timeout_ms,
-                "proxies": _proxy_config(config),
-                "options": {
-                    "adjustForTimeDifference": True,
-                    "defaultType": "future",
-                },
-            }
-        )
+        exchange = _build_exchange(config, exchange_name=exchange_name)
         server_time = exchange.fetch_time()
         return server_time is not None
     except Exception as exc:
-        logger.warning("binance connectivity check failed: {}", exc)
+        logger.warning("{} connectivity check failed: {}", exchange_name, exc)
         return False
+
+
+def _can_reach_binance(config: dict[str, Any], timeout_ms: int = 8000) -> bool:
+    return _can_reach_exchange(config, "binance", timeout_ms=timeout_ms)
 
 
 def _try_clash_failover_and_wait_binance(project_root: Path, config: dict[str, Any]) -> bool:
@@ -93,10 +87,12 @@ def _try_clash_failover_and_wait_binance(project_root: Path, config: dict[str, A
     warmup_seconds = max(float(failover.get("warmup_seconds", 3.0)), 0.5)
     check_timeout_ms = max(int(failover.get("check_timeout_ms", 8000)), 1000)
     group = str(failover.get("group", "GLOBAL"))
+    exchange_names = _exchange_names(config)
 
     node_candidates = failover.get("nodes")
     if not isinstance(node_candidates, list) or not node_candidates:
-        node_candidates = [str(failover.get("node", "AUTO"))]
+        preferred = str(failover.get("node", "AUTO"))
+        node_candidates = [preferred, "⚙️ 故障转移", "🔰 节点选择"]
     node_candidates = [str(node) for node in node_candidates if str(node).strip()]
     if not node_candidates:
         node_candidates = ["AUTO"]
@@ -127,11 +123,28 @@ def _try_clash_failover_and_wait_binance(project_root: Path, config: dict[str, A
             continue
 
         time.sleep(warmup_seconds)
-        if _can_reach_binance(config, timeout_ms=check_timeout_ms):
-            logger.info("binance connectivity recovered after clash failover")
+        round_recovered = False
+        for exchange_name in exchange_names:
+            check_start = time.time()
+            reachable = _can_reach_exchange(config, exchange_name, timeout_ms=check_timeout_ms)
+            check_ms = int((time.time() - check_start) * 1000)
+            logger.info(
+                "exchange connectivity probe after failover round {}: node={} exchange={} reachable={} elapsed_ms={}",
+                round_idx + 1,
+                node,
+                exchange_name,
+                reachable,
+                check_ms,
+            )
+            if reachable:
+                logger.info("{} connectivity recovered after clash failover", exchange_name)
+                round_recovered = True
+                break
+
+        if round_recovered:
             return True
 
-    logger.error("clash failover exhausted: binance still unreachable after {} rounds", max_rounds)
+    logger.error("clash failover exhausted: exchanges still unreachable after {} rounds", max_rounds)
     return False
 
 

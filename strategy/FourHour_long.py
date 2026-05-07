@@ -1,7 +1,11 @@
-﻿from enum import Enum
-from dataclasses import dataclass
-import time
+from __future__ import annotations
 
+import time
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -21,462 +25,481 @@ class StrategyResult(Enum):
 class Monitor:
     StrategyResult: StrategyResult
     metric: str | list[str]
-    score: int
-    timestamp: str
+    score: float
+    timestamp: int
+    fallback_value: float = 0.0
 
 
-curr_time = int(time.time() * 1000)
+def _now_ts() -> int:
+    return int(time.time() * 1000)
 
 
-def is_system_ready(df_4h, df_daily, allow_stale: bool = False):
-    if len(df_4h) < 200 or len(df_daily) < 40:
-        logger.error("NOK! Daily data deficiency")
-        return False
-
-    last_ts = df_4h.iloc[-1]["timestamp"]
-    if not allow_stale and ((time.time() * 1000) - last_ts.timestamp() * 1000) > (4 * 3600 * 1000 * 1.5):
-        logger.error("NOK! Data is stale (Outdated)")
-        return False
-
-    return True
-
-
-def eval_trend(df_4h, df_daily):
-    """
-    Description: 看大势 - 趋势过滤系统 (Long Only)
-    """
-    res = Res["OK"]
-
-    if not is_system_ready(df_4h, df_daily, allow_stale=True):
-        logger.error("NOK! Daily data deficiency")
-        return Res["ERR"], None
-
-    score = 0
-    metrics = []
-
-    df_daily["ema200"] = df_daily["close"].ewm(span=200, adjust=False).mean()
-
-    last_day = df_daily.iloc[-1]
-    prev_day = df_daily.iloc[-2]
-    ema_slope = last_day["ema200"] - prev_day["ema200"]
-
-    if last_day["close"] > last_day["ema200"]:
-        if ema_slope > 0:
-            score += 4
-            metrics.append("日线EMA200上方且向上 (+4)")
-        else:
-            score += 2
-            metrics.append("日线EMA200上方但走平 (+2)")
-    else:
-        metrics.append("日线EMA200下方 (趋势过滤失败)")
-
-    df_4h["ema50"] = df_4h["close"].ewm(span=50, adjust=False).mean()
-    df_4h["ema200"] = df_4h["close"].ewm(span=200, adjust=False).mean()
-
-    last_4h = df_4h.iloc[-1]
-    prev_4h = df_4h.iloc[-2]
-    ema50_slope = last_4h["ema50"] - prev_4h["ema50"]
-
-    if last_4h["ema50"] > last_4h["ema200"]:
-        score += 2
-        metrics.append("4H EMA50 > EMA200 (+2)")
-    else:
-        metrics.append("4H EMA50 < EMA200 (+0)")
-
-    if last_4h["close"] > last_4h["ema50"]:
-        score += 1
-        metrics.append("价格站上EMA50 (+1)")
-    else:
-        metrics.append("价格跌破EMA50 (+0)")
-
-    if ema50_slope > 0:
-        score += 1
-        metrics.append("EMA50上升 (+1)")
-
-    recent_high = df_4h["high"].iloc[-10:].max()
-    prev_high = df_4h["high"].iloc[-20:-10].max()
-
-    if recent_high > prev_high:
-        score += 1
-        metrics.append("结构创新高 (+1)")
-    else:
-        metrics.append("未创新高 (+0)")
-
-    trend = Monitor(
-        StrategyResult=StrategyResult.WAIT,
-        metric=metrics,
-        score=score,
-        timestamp=curr_time,
-    )
-    return res, trend
+def _calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    tr = pd.concat(
+        [
+            high - low,
+            (high - close.shift()).abs(),
+            (low - close.shift()).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.rolling(period).mean()
 
 
-def eval_momentum(df_4h):
-    """
-    Description: 势能评分 (Momentum Factor)
-    逻辑结构:
-    1. 趋势确认: EMA15 > EMA50
-    2. 动能确认: 价格高于 EMA15
-    3. 斜率确认: EMA15 上升
-    """
-    res = Res["OK"]
-
-    close = df_4h["close"]
-    ema15 = close.ewm(span=15).mean()
-    ema50 = close.ewm(span=50).mean()
-    price = close.iloc[-1]
-
-    score = 0
-    metrics = []
-
-    if ema15.iloc[-1] > ema50.iloc[-1]:
-        score += 1
-        metrics.append("EMA15 > EMA50, 动能强劲")
-
-    slope = ema15.iloc[-1] - ema15.iloc[-2]
-    if slope > 0:
-        score += 1
-        metrics.append("EMA15 上升")
-
-    if price > ema15.iloc[-1]:
-        score += 1
-        metrics.append("价格高于 EMA15")
-
-    return res, Monitor(
-        StrategyResult=StrategyResult.WAIT,
-        metric=" | ".join(metrics),
-        score=score,
-        timestamp=curr_time,
-    )
-
-
-def eval_position(df_4h):
-    """
-    Description: 位置评分 - 衡量价格偏离均值程度
-    """
-    res = Res["OK"]
-
-    df_4h["bb_mid"] = df_4h["close"].rolling(window=20).mean()
-    df_4h["bb_std"] = df_4h["close"].rolling(window=20).std()
-    df_4h["bb_lower"] = df_4h["bb_mid"] - (2 * df_4h["bb_std"])
-    df_4h["zscore"] = (df_4h["close"] - df_4h["bb_mid"]) / df_4h["bb_std"]
-
-    last = df_4h.iloc[-1]
-    prev = df_4h.iloc[-2]
-
-    score = 0
-    metrics = []
-    z = last["zscore"]
-
-    if z <= -2.5:
-        score += 4
-        metrics.append("极端超跌 Z<-2.5")
-    elif z <= -2:
-        score += 3
-        metrics.append("严重超跌 Z<-2")
-    elif z <= -1.5:
-        score += 2
-        metrics.append("明显低估 Z<-1.5")
-    elif z <= -1:
-        score += 1
-        metrics.append("轻微低估 Z<-1")
-
-    if last["close"] <= last["bb_lower"]:
-        score += 1
-        metrics.append("触及布林下轨")
-
-    if prev["close"] < prev["bb_lower"] and last["close"] > last["bb_lower"]:
-        score += 2
-        metrics.append("跌破后重新收回布林带")
-
-    distance = (last["bb_mid"] - last["close"]) / (last["bb_mid"] + 1e-9)
-    if distance > 0.05:
-        score += 2
-        metrics.append("价格偏离均值 >5%")
-    elif distance > 0.03:
-        score += 1
-        metrics.append("价格偏离均值 >3%")
-
-    metric_str = " | ".join(metrics) if metrics else "位置中性"
-    return res, Monitor(
-        StrategyResult=StrategyResult.WAIT,
-        metric=f"{metric_str} (+{score})",
-        score=score,
-        timestamp=curr_time,
-    )
-
-
-def eval_rsi(df_4h):
-    """
-    Description: RSI 情绪评分
-    """
-    res = Res["OK"]
-
-    close = df_4h["close"]
+def _calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(alpha=1 / 14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / 14, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
     rs = avg_gain / (avg_loss + 1e-9)
-    df_4h["rsi"] = 100 - (100 / (1 + rs))
-
-    rsi_t = df_4h["rsi"].iloc[-1]
-    rsi_t1 = df_4h["rsi"].iloc[-2]
-    rsi_t2 = df_4h["rsi"].iloc[-3]
-    logger.debug(df_4h["rsi"])
-
-    oversold = rsi_t < 40
-    rebound = rsi_t > rsi_t1
-    turning_point = rsi_t1 < rsi_t2 and rsi_t > rsi_t1
-
-    if oversold and rebound and turning_point:
-        emotion = Monitor(
-            StrategyResult=StrategyResult.WAIT,
-            metric="RSI超卖并出现反弹拐点 (+1)",
-            score=1,
-            timestamp=curr_time,
-        )
-    else:
-        emotion = Monitor(
-            StrategyResult=StrategyResult.WAIT,
-            metric="RSI情绪正常 (+0)",
-            score=0,
-            timestamp=curr_time,
-        )
-
-    return res, emotion
+    return 100 - (100 / (1 + rs))
 
 
-def eval_exit(df_4h, entry_price):
-    logger.info("----Start Calculate selling point signal----")
-
-    res = Res["ERR"]
-    if df_4h is None or df_4h.empty or entry_price is None or len(df_4h) < 20:
-        return res, None
-
-    try:
-        close = df_4h["close"]
-        high = df_4h["high"]
-        low = df_4h["low"]
-        current_price = close.iloc[-1]
-
-        ema15 = close.ewm(span=15).mean()
-
-        tr = pd.concat(
-            [
-                high - low,
-                (high - close.shift()).abs(),
-                (low - close.shift()).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
-
-        atr = tr.rolling(14).mean().iloc[-1]
-        acceleration = close.pct_change().rolling(3).sum().iloc[-1]
-
-        delta = close.diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / (loss + 1e-9)
-        rsi = 100 - (100 / (1 + rs))
-
-        action = StrategyResult.WAIT
-        metric = "持仓中"
-
-        if current_price <= entry_price - 2.0 * atr:
-            action = StrategyResult.EXIT
-            metric = "止损:ATR硬止损"
-        elif acceleration > 0.08:
-            action = StrategyResult.EXIT
-            metric = "止盈:短期过热"
-        elif (
-            rsi.iloc[-1] < rsi.iloc[-2]
-            and rsi.iloc[-2] > 70
-            and current_price > ema15.iloc[-1]
-        ):
-            action = StrategyResult.EXIT
-            metric = "止盈:动能衰减(RSI)"
-        elif current_price < ema15.iloc[-1] and ema15.iloc[-1] < ema15.iloc[-2]:
-            action = StrategyResult.EXIT
-            metric = "止盈:趋势破坏"
-        else:
-            recent_high = high.rolling(10).max().iloc[-1]
-            trailing_stop = recent_high - 2.0 * atr
-            if current_price < trailing_stop:
-                action = StrategyResult.EXIT
-                metric = "止盈:ATR回撤"
-
-        res = Res["OK"]
-        exit_signal = Monitor(
-            StrategyResult=action,
-            metric=metric,
-            score=0,
-            timestamp=curr_time,
-        )
-        return res, exit_signal
-    except Exception as e:
-        logger.error(f"eval_exit error: {e}")
-        return res, None
+def _find_recent_swing_low(df: pd.DataFrame, lookback: int = 10) -> float:
+    if df is None or len(df) < lookback:
+        return np.nan
+    return float(df["low"].iloc[-lookback:].min())
 
 
-def testsuite_result(df_4h, df_daily):
-    res = Res["OK"]
-    total_socres = 0
-    metrics = []
-    try:
-        res, regime = eval_regime(df_4h)
-        res, position = eval_position(df_4h)
-
-        if regime.score >= 3 and position.score >= 2:
-            test_cases = {
-                "eval_trend": eval_trend(df_4h, df_daily),
-                "eval_momentum": eval_momentum(df_4h),
-                "eval_position": eval_position(df_4h),
-                "eval_rsi": eval_rsi(df_4h),
-                "eval_regime": eval_regime(df_4h),
-            }
-
-            for name, (result, trend) in test_cases.items():
-                logger.info(f"test_case:{name} -> execute Result is>> {result}, Trend detail: {trend}")
-                if result != Res["OK"] or trend is None:
-                    logger.error("NOK! The case failed to occur,Please check log")
-                    return Res["ERR"], total_socres, None
-                total_socres += trend.score
-                metric_value = getattr(trend, "metric", None)
-                if metric_value is None:
-                    continue
-                if isinstance(metric_value, list):
-                    metrics.extend([str(item) for item in metric_value])
-                else:
-                    metrics.append(str(metric_value))
-
-            if all(val[0] == Res["OK"] for val in test_cases.values()):
-                return res, total_socres, metrics
-
-            logger.error("NOK! The case failed to occur,Please check log")
-            return Res["ERR"], total_socres, None
-
-        logger.warning(f"NOK! The preconditions are not met,the score is>>{regime.score + position.score}<<")
-        return res, total_socres, None
-    except Exception as e:
-        logger.error(f"NOK! err:{e}")
-        return Res["ERR"], total_socres, None
+def _range_position(df: pd.DataFrame, lookback: int = 40) -> float:
+    if df is None or len(df) < lookback:
+        return np.nan
+    recent = df.iloc[-lookback:]
+    low = recent["low"].min()
+    high = recent["high"].max()
+    close = recent["close"].iloc[-1]
+    if pd.isna(low) or pd.isna(high) or high <= low:
+        return np.nan
+    return float((close - low) / (high - low + 1e-9))
 
 
-# v1.2
-def eval_regime(df_4h):
-    """
-    Description: 市场状态过滤
-    """
-    res = Res["OK"]
+def _find_local_swing_points(df: pd.DataFrame, left: int = 2, right: int = 2) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
+    if df is None or len(df) < left + right + 5:
+        return [], []
+    highs: list[tuple[int, float]] = []
+    lows: list[tuple[int, float]] = []
+    h = df["high"].values
+    l = df["low"].values
+    for i in range(left, len(df) - right):
+        if h[i] == max(h[i - left : i + right + 1]):
+            highs.append((i, float(h[i])))
+        if l[i] == min(l[i - left : i + right + 1]):
+            lows.append((i, float(l[i])))
+    return highs, lows
 
-    high = df_4h["high"]
-    low = df_4h["low"]
-    close = df_4h["close"]
+
+def is_system_ready(df_4h: pd.DataFrame, df_daily: pd.DataFrame, allow_stale: bool = True) -> bool:
+    if df_4h is None or df_daily is None or len(df_4h) < 200 or len(df_daily) < 40:
+        logger.error("NOK! long strategy data deficiency")
+        return False
+    return True
+
+
+def eval_trend(df_4h: pd.DataFrame, df_daily: pd.DataFrame) -> tuple[int, Monitor | None]:
+    if not is_system_ready(df_4h, df_daily, allow_stale=True):
+        return Res["ERR"], None
+
+    d = df_daily.copy()
+    h4 = df_4h.copy()
+    d["ema200"] = d["close"].ewm(span=200, adjust=False).mean()
+    h4["ema50"] = h4["close"].ewm(span=50, adjust=False).mean()
+    h4["ema200"] = h4["close"].ewm(span=200, adjust=False).mean()
+
+    last_d = d.iloc[-1]
+    prev_d = d.iloc[-2]
+    last_4h = h4.iloc[-1]
+    prev_4h = h4.iloc[-2]
 
     score = 0
-    metrics = []
+    metrics: list[str] = []
 
-    ema15 = close.ewm(span=15).mean()
-    ema50 = close.ewm(span=50).mean()
+    ema200_slope = last_d["ema200"] - prev_d["ema200"]
+    if last_d["close"] > last_d["ema200"] * 1.01:
+        if ema200_slope > 0:
+            score += 5
+            metrics.append("daily above rising EMA200 (+5)")
+        else:
+            score += 2
+            metrics.append("daily above flat EMA200 (+2)")
+    else:
+        metrics.append("daily trend filter failed (+0)")
 
-    tr1 = high - low
-    tr2 = (high - close.shift()).abs()
-    tr3 = (low - close.shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    if last_4h["ema50"] > last_4h["ema200"]:
+        score += 2
+        metrics.append("4h EMA50 > EMA200 (+2)")
+    if last_4h["close"] > last_4h["ema50"]:
+        score += 1
+        metrics.append("4h close above EMA50 (+1)")
+    if (last_4h["ema50"] - prev_4h["ema50"]) > 0:
+        score += 1
+        metrics.append("4h EMA50 rising (+1)")
 
-    atr = tr.rolling(14).mean()
+    return Res["OK"], Monitor(
+        StrategyResult=StrategyResult.WAIT,
+        metric=" | ".join(metrics) if metrics else "trend neutral",
+        score=score,
+        timestamp=_now_ts(),
+    )
+
+
+def eval_position(df_4h: pd.DataFrame) -> tuple[int, Monitor | None]:
+    if df_4h is None or len(df_4h) < 30:
+        return Res["ERR"], None
+
+    h4 = df_4h.copy()
+    h4["bb_mid"] = h4["close"].rolling(20).mean()
+    h4["bb_std"] = h4["close"].rolling(20).std()
+    h4["bb_lower"] = h4["bb_mid"] - 2 * h4["bb_std"]
+    h4["ema200"] = h4["close"].ewm(span=200, adjust=False).mean()
+    h4["zscore"] = (h4["close"] - h4["bb_mid"]) / (h4["bb_std"] + 1e-9)
+
+    last = h4.iloc[-1]
+    prev = h4.iloc[-2]
+    z = float(last["zscore"])
+    score = 0
+    metrics: list[str] = []
+
+    if last["close"] < last["ema200"]:
+        score -= 2
+        metrics.append("below EMA200 penalty (-2)")
+
+    if -2.5 < z <= -1:
+        score += 1
+        metrics.append(f"pullback zone z={z:.2f} (+1)")
+    elif -3 < z <= -2.5:
+        score += 2
+        metrics.append(f"deep pullback z={z:.2f} (+2)")
+
+    if prev["close"] < prev["bb_lower"] and last["close"] > last["bb_lower"]:
+        score += 3
+        metrics.append("reclaim Bollinger lower band (+3)")
+
+    return Res["OK"], Monitor(
+        StrategyResult=StrategyResult.WAIT,
+        metric=" | ".join(metrics) if metrics else "position neutral",
+        score=score,
+        timestamp=_now_ts(),
+    )
+
+
+def eval_long_trigger_1h(df_1h: pd.DataFrame) -> tuple[int, Monitor | None]:
+    if df_1h is None or len(df_1h) < 100:
+        return Res["ERR"], None
+
+    close = df_1h["close"]
+    high = df_1h["high"]
+    score = 0
+    metrics: list[str] = []
+    ema15 = close.ewm(span=15, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+
+    if ema15.iloc[-1] > ema50.iloc[-1]:
+        score += 1
+        metrics.append("1h EMA15 > EMA50 (+1)")
+    if close.iloc[-2] < ema15.iloc[-2] and close.iloc[-1] > ema15.iloc[-1]:
+        score += 2
+        metrics.append("1h reclaim EMA15 (+2)")
+    if (ema15.iloc[-2] - ema15.iloc[-3]) < 0 and (ema15.iloc[-1] - ema15.iloc[-2]) > 0:
+        score += 2
+        metrics.append("1h EMA15 turns up (+2)")
+    if close.iloc[-1] > high.iloc[-6:-1].max():
+        score += 2
+        metrics.append("1h breakout recent high (+2)")
+
+    vol_ma = df_1h["volume"].rolling(20).mean() if "volume" in df_1h.columns else None
+    if vol_ma is not None and df_1h["volume"].iloc[-1] > vol_ma.iloc[-1] * 1.5:
+        score += 1
+        metrics.append("1h volume expansion (+1)")
+
+    action = StrategyResult.LONG if score >= 4 else StrategyResult.WAIT
+    return Res["OK"], Monitor(
+        StrategyResult=action,
+        metric=" | ".join(metrics) if metrics else "1h trigger neutral",
+        score=score,
+        timestamp=_now_ts(),
+    )
+
+
+def eval_regime(df_4h: pd.DataFrame) -> tuple[int, Monitor | None]:
+    if df_4h is None or len(df_4h) < 80:
+        return Res["ERR"], None
+
+    h4 = df_4h.copy()
+    close = h4["close"]
+    high = h4["high"]
+    low = h4["low"]
+    atr = _calc_atr(h4, 14)
     atr_mean = atr.rolling(50).mean()
     atr_ratio = atr.iloc[-1] / (atr_mean.iloc[-1] + 1e-9)
+    ema15 = close.ewm(span=15, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
 
+    score = 0
+    metrics: list[str] = []
     if atr_ratio > 1.2:
         score += 2
-        metrics.append("ATR扩张")
+        metrics.append("ATR expanding (+2)")
     elif atr_ratio > 1.0:
         score += 1
-        metrics.append("ATR正常")
-    else:
-        metrics.append("ATR收缩")
+        metrics.append("ATR normal (+1)")
 
     plus_dm = high.diff().clip(lower=0)
     minus_dm = (-low.diff()).clip(lower=0)
-    tr_smooth = tr.ewm(alpha=1 / 14).mean()
-    plus_di = 100 * (plus_dm.ewm(alpha=1 / 14).mean() / (tr_smooth + 1e-9))
-    minus_di = 100 * (minus_dm.ewm(alpha=1 / 14).mean() / (tr_smooth + 1e-9))
+    tr_smooth = _calc_atr(h4, 14).ewm(alpha=1 / 14, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / (tr_smooth + 1e-9))
+    minus_di = 100 * (minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / (tr_smooth + 1e-9))
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
-    adx = dx.ewm(alpha=1 / 14).mean()
-    adx_last = adx.iloc[-1]
-
-    if adx_last > 25:
+    adx = dx.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1]
+    if adx > 25:
         score += 2
-        metrics.append("强趋势")
-    elif adx_last > 20:
+        metrics.append("strong trend regime (+2)")
+    elif adx > 20:
         score += 1
-        metrics.append("弱趋势")
-    else:
-        metrics.append("震荡市场")
+        metrics.append("weak trend regime (+1)")
 
     trend_count = (close > ema50).rolling(20).sum().iloc[-1]
     if trend_count > 15:
         score -= 2
-        metrics.append("趋势过长(禁止追多)")
+        metrics.append("extended trend penalty (-2)")
 
     spread = abs(ema15.iloc[-1] - ema50.iloc[-1]) / (ema50.iloc[-1] + 1e-9)
     if spread > 0.01:
         score += 1
-        metrics.append("EMA扩散")
-    else:
-        metrics.append("EMA压缩")
+        metrics.append("EMA spread expanded (+1)")
 
-    return res, Monitor(
+    return Res["OK"], Monitor(
         StrategyResult=StrategyResult.WAIT,
-        metric=" | ".join(metrics),
+        metric=" | ".join(metrics) if metrics else "regime neutral",
         score=score,
-        timestamp=curr_time,
+        timestamp=_now_ts(),
     )
 
 
-def eval_execution_15m(df_15m):
-    """
-    Description: 15m执行层确认
-    """
-    res = Res["OK"]
-
-    if df_15m is None or len(df_15m) < 50:
+def eval_momentum(df_4h: pd.DataFrame) -> tuple[int, Monitor | None]:
+    if df_4h is None or len(df_4h) < 60:
         return Res["ERR"], None
 
-    close = df_15m["close"]
-    high = df_15m["high"]
-
+    close = df_4h["close"]
+    ema15 = close.ewm(span=15, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
     score = 0
-    metrics = []
+    metrics: list[str] = []
 
-    if close.iloc[-1] > close.iloc[-2] > close.iloc[-3]:
+    if ema15.iloc[-1] > ema50.iloc[-1]:
         score += 1
-        metrics.append("15m连续上涨")
-
-    ema20 = close.ewm(span=20).mean()
-    if close.iloc[-1] > ema20.iloc[-1]:
+        metrics.append("4h EMA15 > EMA50 (+1)")
+    if ema15.iloc[-1] > ema15.iloc[-2]:
         score += 1
-        metrics.append("站上EMA20")
-
-    recent_high = high.iloc[-5:-1].max()
-    if close.iloc[-1] > recent_high:
+        metrics.append("4h EMA15 rising (+1)")
+    if close.iloc[-1] > ema15.iloc[-1]:
         score += 1
-        metrics.append("突破短期高点")
+        metrics.append("4h close above EMA15 (+1)")
 
-    if score >= 1:
-        action = StrategyResult.LONG
-        metric = "15m确认通过: " + " | ".join(metrics)
-    else:
-        action = StrategyResult.WAIT
-        metric = "15m未确认"
-
-    return res, Monitor(
-        StrategyResult=action,
-        metric=metric,
+    return Res["OK"], Monitor(
+        StrategyResult=StrategyResult.WAIT,
+        metric=" | ".join(metrics) if metrics else "momentum neutral",
         score=score,
-        timestamp=curr_time,
+        timestamp=_now_ts(),
     )
+
+
+def eval_rsi(df_4h: pd.DataFrame) -> tuple[int, Monitor | None]:
+    if df_4h is None or len(df_4h) < 20:
+        return Res["ERR"], None
+
+    rsi = _calc_rsi(df_4h["close"], 14)
+    rsi_t = rsi.iloc[-1]
+    rsi_t1 = rsi.iloc[-2]
+    rsi_t2 = rsi.iloc[-3]
+    oversold = rsi_t < 40
+    rebound = rsi_t > rsi_t1
+    turning_point = rsi_t1 < rsi_t2 and rsi_t > rsi_t1
+    if oversold and rebound and turning_point:
+        return Res["OK"], Monitor(
+            StrategyResult=StrategyResult.WAIT,
+            metric=f"RSI oversold rebound rsi={rsi_t:.2f} (+1)",
+            score=1,
+            timestamp=_now_ts(),
+        )
+    return Res["OK"], Monitor(
+        StrategyResult=StrategyResult.WAIT,
+        metric=f"RSI neutral rsi={rsi_t:.2f} (+0)",
+        score=0,
+        timestamp=_now_ts(),
+    )
+
+
+def eval_long_risk(df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> tuple[int, Monitor | None]:
+    if df_1h is None or df_4h is None or len(df_1h) < 30 or len(df_4h) < 20:
+        return Res["ERR"], None
+
+    h4 = df_4h.copy()
+    atr_last = _calc_atr(h4, period=14).iloc[-1]
+    current_price = float(df_1h["close"].iloc[-1])
+    swing_low = _find_recent_swing_low(df_1h, lookback=10)
+    if pd.isna(swing_low) or pd.isna(atr_last):
+        return Res["ERR"], None
+
+    stop_loss = float(swing_low - 0.3 * atr_last)
+    risk_pct = (current_price - stop_loss) / (current_price + 1e-9)
+    score = 0
+    metrics: list[str] = []
+
+    if stop_loss < current_price:
+        score += 6
+        metrics.append(f"structure stop valid stop={stop_loss:.4f} (+6)")
+    if 0 < risk_pct <= 0.01:
+        score += 5
+        metrics.append("risk distance <=1% (+5)")
+    elif 0.01 < risk_pct <= 0.02:
+        score += 4
+        metrics.append("risk distance <=2% (+4)")
+    elif 0.02 < risk_pct <= 0.03:
+        score += 2
+        metrics.append("risk distance <=3% (+2)")
+    else:
+        metrics.append("risk distance too wide (+0)")
+
+    ema20_1h = df_1h["close"].ewm(span=20, adjust=False).mean().iloc[-1]
+    stretch = (current_price - ema20_1h) / (ema20_1h + 1e-9)
+    if stretch < 0.012:
+        score += 4
+        metrics.append("not overextended above EMA20 (+4)")
+
+    action = StrategyResult.LONG if score >= 10 else StrategyResult.WAIT
+    return Res["OK"], Monitor(
+        StrategyResult=action,
+        metric=" | ".join(metrics),
+        score=min(score, 15),
+        timestamp=_now_ts(),
+        fallback_value=float(round(stop_loss, 4)),
+    )
+
+
+def eval_exit(
+    df_1h: pd.DataFrame,
+    df_4h: pd.DataFrame,
+    current_price: float,
+    initial_stop: float,
+    current_rr: float,
+    peak_rr: float,
+    return_pct: float,
+) -> tuple[int, Monitor | None]:
+    try:
+        ema20 = df_1h["close"].ewm(span=20, adjust=False).mean()
+        atr = _calc_atr(df_4h, period=14).iloc[-1]
+        action = StrategyResult.WAIT
+        metric = "hold long"
+
+        if return_pct <= -0.03:
+            action = StrategyResult.EXIT
+            metric = f"hard stop: return_pct={return_pct * 100:.2f}%"
+            return Res["OK"], Monitor(action, metric, 0, _now_ts())
+
+        if current_price <= initial_stop:
+            action = StrategyResult.EXIT
+            metric = f"structure stop broken: stop={initial_stop:.2f}"
+            return Res["OK"], Monitor(action, metric, 0, _now_ts())
+
+        if peak_rr >= 1.5:
+            if peak_rr >= 3.0:
+                atr_mult = 1.0
+            elif peak_rr >= 2.0:
+                atr_mult = 1.5
+            else:
+                atr_mult = 2.0
+            recent_highest_high = df_1h["high"].rolling(12).max().iloc[-1]
+            trailing_stop = recent_highest_high - (atr_mult * atr)
+            if current_price <= trailing_stop and current_rr > 0.5:
+                action = StrategyResult.EXIT
+                metric = f"trailing stop: peak_rr={peak_rr:.2f}, stop={trailing_stop:.2f}"
+                return Res["OK"], Monitor(action, metric, 0, _now_ts())
+
+        if peak_rr < 1.5 and current_price < ema20.iloc[-1] and ema20.iloc[-1] < ema20.iloc[-2]:
+            action = StrategyResult.EXIT
+            metric = "trend broken: below falling EMA20"
+            return Res["OK"], Monitor(action, metric, 0, _now_ts())
+
+        return Res["OK"], Monitor(action, metric, 0, _now_ts())
+    except Exception as exc:
+        logger.error(f"eval_exit_long error: {exc}")
+        return Res["ERR"], None
+
+
+def testsuite_result(df_1h: pd.DataFrame, df_4h: pd.DataFrame, df_daily: pd.DataFrame) -> tuple[int, float, dict[str, Any]]:
+    total_score = 0.0
+    parameters: dict[str, Any] = {}
+    metrics: list[str] = []
+    risk_stop_price: list[str] = []
+    try:
+        checks = {
+            "eval_regime": eval_regime(df_4h),
+            "eval_trend": eval_trend(df_4h, df_daily),
+            "eval_position": eval_position(df_4h),
+            "eval_momentum": eval_momentum(df_4h),
+            "eval_rsi": eval_rsi(df_4h),
+            "eval_long_trigger_1h": eval_long_trigger_1h(df_1h),
+            "eval_long_risk": eval_long_risk(df_1h, df_4h),
+        }
+
+        monitors: dict[str, Monitor] = {}
+        for name, (result, monitor) in checks.items():
+            logger.info(f"test_case:{name} -> execute Result is>> {result}, detail: {monitor}")
+            if result != Res["OK"] or monitor is None:
+                parameters.update({"failed_case": name, "metric_str": " | ".join(metrics)})
+                return Res["ERR"], total_score, parameters
+            monitors[name] = monitor
+
+        regime = monitors["eval_regime"]
+        position = monitors["eval_position"]
+        ema50 = df_4h["close"].ewm(span=50, adjust=False).mean()
+        distance = (df_4h["close"].iloc[-1] - ema50.iloc[-1]) / (ema50.iloc[-1] + 1e-9)
+
+        parameters.update(
+            {
+                "regime_score": regime.score,
+                "position_score": position.score,
+                "ema50_distance": float(distance),
+                "preconditions_met": regime.score >= 2 and distance <= 0.08,
+            }
+        )
+
+        if regime.score < 2:
+            parameters["metric_str"] = f"[eval_regime] {regime.metric}"
+            return Res["OK"], 0.0, parameters
+        if distance > 0.08:
+            parameters["metric_str"] = f"price too far above EMA50: distance={distance:.2%}"
+            return Res["OK"], 0.0, parameters
+
+        for name, monitor in monitors.items():
+            weight = 1.5 if name == "eval_long_trigger_1h" else 1.0
+            total_score += float(monitor.score) * weight
+            metrics.append(f"[{name}] {monitor.metric}")
+            if monitor.fallback_value:
+                risk_stop_price.append(f"[{name}] {monitor.fallback_value}")
+
+        parameters["metric_str"] = " | ".join(metrics)
+        parameters["risk_stop_price"] = risk_stop_price
+        parameters["total_score"] = total_score
+        return Res["OK"], total_score, parameters
+    except Exception as exc:
+        logger.error(f"NOK! testsuite_long_result err:{exc}")
+        return Res["ERR"], total_score, parameters
+
+
+def calc_long_performance(entry_price: float, current_price: float, stop_loss_price: float | None = None) -> dict[str, float | None]:
+    if entry_price is None or entry_price <= 0:
+        return {"return_pct": 0.0, "rr": None}
+    return_pct = (current_price - entry_price) / entry_price
+    rr = None
+    if stop_loss_price is not None:
+        initial_risk = entry_price - stop_loss_price
+        if initial_risk > 0:
+            rr = (current_price - entry_price) / initial_risk
+        elif initial_risk < 0:
+            rr = 0.0
+    return {"return_pct": return_pct, "rr": rr}

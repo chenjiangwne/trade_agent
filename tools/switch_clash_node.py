@@ -60,9 +60,49 @@ def show_group(controller: str, secret: str, group: str) -> None:
         print(f"{prefix} {node}")
 
 
+def _resolve_target_node(item: dict, requested: str) -> str:
+    all_nodes = [str(node) for node in item.get("all", [])]
+    current = str(item.get("now", ""))
+    req = str(requested or "").strip()
+    if not all_nodes:
+        raise RuntimeError("group has no selectable nodes")
+
+    if req in all_nodes:
+        return req
+
+    req_lower = req.lower()
+    auto_aliases = {"auto", "automatic", "auto_select", "auto-select", "自动", "自动选择", "♻️ 自动选择"}
+    if req_lower in auto_aliases or req in auto_aliases:
+        for node in all_nodes:
+            node_lower = node.lower()
+            if "自动" in node or "auto" in node_lower:
+                return node
+        if current and current in all_nodes:
+            return current
+        return all_nodes[0]
+
+    # fuzzy match to tolerate terminal encoding/copy issues
+    for node in all_nodes:
+        if req and req in node:
+            return node
+    for node in all_nodes:
+        if req_lower and req_lower in node.lower():
+            return node
+
+    if current and current in all_nodes:
+        print(f"requested node not found in group, fallback to current node: {current}")
+        return current
+    raise RuntimeError(f"node not found in group: {requested}")
+
+
 def switch_node(controller: str, secret: str, group: str, node: str) -> None:
-    _request(controller, secret, "PUT", f"/proxies/{quote(group, safe='')}", {"name": node})
-    print(f"switched group={group} node={node}")
+    proxies = _get_proxies(controller, secret)
+    item = proxies.get(group)
+    if not item:
+        raise RuntimeError(f"group not found: {group}")
+    target = _resolve_target_node(item, node)
+    _request(controller, secret, "PUT", f"/proxies/{quote(group, safe='')}", {"name": target})
+    print(f"switched group={group} node={target}")
 
 
 def main() -> None:

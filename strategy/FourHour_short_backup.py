@@ -468,7 +468,7 @@ def eval_short_risk(df_1h, df_4h):
             metric=" | ".join(metrics),
             score=min(score, 15),
             timestamp=_now_ts(),
-            fallback_value={round(stop_loss, 4)})
+            fallback_value=float(round(stop_loss, 4)))
     except Exception as e:
         logger.error(f"eval_short_risk error: {e}")
         return Res["ERR"], None
@@ -530,6 +530,7 @@ def eval_exit(df_1h, df_4h, current_price, initial_stop, current_rr, peak_rr, re
     except Exception as e:
         logger.error(f"eval_exit_short error: {e}")
         return Res["ERR"], None
+        
 def testsuite_result(df_1h,df_4h,df_daily):
     res = Res["OK"]
     total_score = 0
@@ -554,15 +555,15 @@ def testsuite_result(df_1h,df_4h,df_daily):
                 bg_base_score = 2
             else:
                 bg_base_score = 1
+
             test_cases = {
                 "eval_short_background_base": (
                     Res["OK"],
                     Monitor(
                         StrategyResult=StrategyResult.SHORT,
-                        metric=f"?????????????? (+{bg_base_score})",
+                        metric=f"背景前置通过，给予背景基准分 (+{bg_base_score})",
                         score=bg_base_score,
-                        timestamp=_now_ts(),
-                        fallback_value=0.0
+                        timestamp=_now_ts()
                     )
                 ),
                 "eval_short_resistance_zone": (res_zone, zone),

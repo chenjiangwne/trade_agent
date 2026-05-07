@@ -182,9 +182,40 @@ def eval_short_background(df_daily, df_4h):
             metrics.append("日线未形成HH+HL牛市反转结构 (+5)")
         else:
             metrics.append("日线已出现HH+HL雏形 (+0)")
+        
+        h4 = df_4h.copy()
+        h4["ema50"] = h4["close"].ewm(span=50, adjust=False).mean()
+        h4["ema200"] = h4["close"].ewm(span=200, adjust=False).mean()
+
+        last_4h = h4.iloc[-1]
+        prev_4h = h4.iloc[-2]
+
+        ema50_slope = last_4h["ema50"] - prev_4h["ema50"]
+
+        # ❗ 如果仍然是上涨结构 → 直接扣分甚至禁止
+        if last_4h["ema50"] > last_4h["ema200"]:
+            score -= 2
+            metrics.append("4H多头结构(禁止做空) (-2)")
+
+        if last_4h["close"] > last_4h["ema50"]:
+            score -= 1
+            metrics.append("价格仍在EMA50上方(上涨中) (-1)")
+
+        if ema50_slope > 0:
+            score -= 1
+            metrics.append("EMA50仍在上升(趋势未结束) (-1)")
+
+        # 是否还在创新高
+        recent_high = h4["high"].iloc[-10:].max()
+        prev_high = h4["high"].iloc[-20:-10].max()
+
+        if recent_high > prev_high:
+            score -= 2
+            metrics.append("4H仍在创新高(禁止做空) (-2)")
+        else:
+            score += 4
+            metrics.append("4H未创新高(转弱迹象) (+4)")
         action = StrategyResult.WAIT
-        if score >= 18:
-            action = StrategyResult.SHORT
         return res, Monitor(
             StrategyResult=action,
             metric=" | ".join(metrics),
@@ -530,6 +561,7 @@ def eval_exit(df_1h, df_4h, current_price, initial_stop, current_rr, peak_rr, re
     except Exception as e:
         logger.error(f"eval_exit_short error: {e}")
         return Res["ERR"], None
+        
 def testsuite_result(df_1h,df_4h,df_daily):
     res = Res["OK"]
     total_score = 0
