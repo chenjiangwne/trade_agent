@@ -12,9 +12,9 @@ logger.debug(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from generic.Common import yml_reader
+from generic.Common import calc_atr, find_recent_swing_low, yml_reader
 from generic.logger import init_report
-from strategy.FourHour_long import Res, StrategyResult, eval_exit, testsuite_result, calc_long_performance, _find_recent_swing_low, _calc_atr
+from strategy.FourHour_long import Res, StrategyResult, eval_exit, testsuite_result, calc_long_performance
 
 project_root = PROJECT_ROOT
 Res = {"OK": 0, "ERR": -1, "EXCEPTION": -2, "empty": 1, "position": 2}
@@ -87,8 +87,8 @@ def backtest():
                         state = Res["position"]
                         entry_price = df_4h.iloc[i]["close"]
                         initial_entry_price = entry_price
-                        atr_4h = _calc_atr(current_df_4h, period=14).iloc[-1]
-                        recent_low = _find_recent_swing_low(current_df_1h, lookback=20)
+                        atr_4h = calc_atr(current_df_4h, period=14).iloc[-1]
+                        recent_low = find_recent_swing_low(current_df_1h, lookback=20)
                         struct_stop = recent_low - 0.3 * atr_4h if not pd.isna(recent_low) else entry_price * 0.99
                         vol_stop = entry_price - 1.5 * atr_4h
                         initial_stop_price = max(struct_stop, vol_stop, entry_price * 0.99)

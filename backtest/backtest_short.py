@@ -11,11 +11,11 @@ logger.debug(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from generic.Common import yml_reader
+from generic.Common import calc_atr, find_recent_swing_high, yml_reader
 from generic.logger import init_report
 from services.market_data_service import _load_table, _resolve_data_file
 # import strategy.FourHour_long as strategy_module
-from strategy.FourHour_short import Res, StrategyResult, eval_exit, testsuite_result,calc_short_performance,_find_recent_swing_high,_calc_atr
+from strategy.FourHour_short import Res, StrategyResult, eval_exit, testsuite_result,calc_short_performance
 # from strategy.FourHour_long import Res, StrategyResult, eval_exit, testsuite_result
 from contextlib import contextmanager
 
@@ -105,9 +105,9 @@ def backtest():
                             initial_entry_price = entry_price  # 锁定初始进场价！
                             entry_index = i
                             # 获取基础数据
-                            atr_4h = _calc_atr(current_df_4h, period=14).iloc[-1]
+                            atr_4h = calc_atr(current_df_4h, period=14).iloc[-1]
                             # 增加回溯范围到 20，更容易找到有效的结构高点
-                            recent_high = _find_recent_swing_high(current_df_1h, lookback=20)
+                            recent_high = find_recent_swing_high(current_df_1h, lookback=20)
 
                             # --- 核心修改：逻辑校验 ---
                             # 1. 计算基于结构的止损

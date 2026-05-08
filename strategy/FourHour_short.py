@@ -3,8 +3,22 @@ from dataclasses import dataclass
 import time
 from loguru import logger
 import pandas as pd
-import numpy as np
 from typing import Any
+from generic.Common import (
+    calc_atr,
+    calc_boll,
+    calc_fib_retracement_zone,
+    calc_macd,
+    calc_range_position,
+    calc_rebound_pct,
+    calc_rsi,
+    dynamic_tolerance,
+    find_local_swing_points,
+    find_recent_swing_high,
+    has_hh_hl_structure,
+    in_zone,
+    is_near_level,
+)
 Res = {"OK": 0, "ERR": -1, "EXCEPTION": -2}
 class StrategyResult(Enum):
     WAIT = "WAIT"
@@ -21,130 +35,6 @@ class Monitor:
     fallback_value: float = 0.0
 def _now_ts():
     return int(time.time() * 1000)
-def _calc_boll(df, window=20, std_mul=2):
-    df = df.copy()
-    df["bb_mid"] = df["close"].rolling(window=window).mean()
-    df["bb_std"] = df["close"].rolling(window=window).std()
-    df["bb_upper"] = df["bb_mid"] + std_mul * df["bb_std"]
-    df["bb_lower"] = df["bb_mid"] - std_mul * df["bb_std"]
-    return df
-def _calc_macd(close, fast=12, slow=26, signal=9):
-    ema_fast = close.ewm(span=fast, adjust=False).mean()
-    ema_slow = close.ewm(span=slow, adjust=False).mean()
-    dif = ema_fast - ema_slow
-    dea = dif.ewm(span=signal, adjust=False).mean()
-    hist = dif - dea
-    return dif, dea, hist
-def _calc_rsi(close, period=14):
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-9)
-    return 100 - (100 / (1 + rs))
-def _calc_atr(df, period=14):
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs()
-    ], axis=1).max(axis=1)
-    return tr.rolling(period).mean()
-def _dynamic_tolerance(df, base_tolerance=0.005, atr_period=14):
-    """根据ATR动态调整容忍度"""
-    atr = _calc_atr(df, atr_period).iloc[-1]
-    price = df["close"].iloc[-1]
-    if pd.isna(atr) or price <= 0:
-        return base_tolerance
-    vol_ratio = atr / price
-    return max(base_tolerance, min(vol_ratio * 0.5, 0.02))
-def _is_near_level(price, level, tolerance=None, df=None):
-    if pd.isna(price) or pd.isna(level) or level == 0:
-        return False
-    if tolerance is None:
-        if df is not None:
-            tolerance = _dynamic_tolerance(df)
-        else:
-            tolerance = 0.01
-    return abs(price - level) / abs(level) <= tolerance
-def _in_zone(price, low, high):
-    if pd.isna(price) or pd.isna(low) or pd.isna(high):
-        return False
-    return low <= price <= high
-def _find_recent_swing_high(df, lookback=10):
-    if df is None or len(df) < lookback:
-        return np.nan
-    return df["high"].iloc[-lookback:].max()
-def _has_hh_hl_structure(df, lookback=20):
-    if df is None or len(df) < lookback:
-        return False
-    recent = df.iloc[-lookback:]
-    if len(recent) < 20:
-        return False
-    highs_0 = recent["high"].iloc[-20:-10].max()
-    highs_1 = recent["high"].iloc[-10:].max()
-    lows_0 = recent["low"].iloc[-20:-10].min()
-    lows_1 = recent["low"].iloc[-10:].min()
-    if pd.isna(highs_0) or pd.isna(highs_1) or pd.isna(lows_0) or pd.isna(lows_1):
-        return False
-    return highs_1 > highs_0 and lows_1 > lows_0
-def _calc_fib_retracement_zone(df_4h, lookback=60):
-    if df_4h is None or len(df_4h) < lookback:
-        return None
-    swing = df_4h.iloc[-lookback:]
-    swing_high = swing["high"].max()
-    swing_low = swing["low"].min()
-    if pd.isna(swing_high) or pd.isna(swing_low) or swing_high <= swing_low:
-        return None
-    diff = swing_high - swing_low
-    fib_618 = swing_low + diff * 0.618
-    fib_786 = swing_low + diff * 0.786
-    return {
-        "fib_618": fib_618,
-        "fib_786": fib_786,
-        "zone_low": min(fib_618, fib_786),
-        "zone_high": max(fib_618, fib_786),
-        "swing_high": swing_high,
-        "swing_low": swing_low
-    }
-def _calc_range_position(df, lookback=40):
-    if df is None or len(df) < lookback:
-        return np.nan
-    recent = df.iloc[-lookback:]
-    range_low = recent["low"].min()
-    range_high = recent["high"].max()
-    current_price = recent["close"].iloc[-1]
-    if pd.isna(range_low) or pd.isna(range_high) or range_high <= range_low:
-        return np.nan
-    return (current_price - range_low) / (range_high - range_low + 1e-9)
-def _find_local_swing_points(df, left=2, right=2):
-    if df is None or len(df) < left + right + 5:
-        return [], []
-    highs = []
-    lows = []
-    h = df["high"].values
-    l = df["low"].values
-    for i in range(left, len(df) - right):
-        if h[i] == max(h[i-left:i+right+1]):
-            highs.append((i, h[i]))
-        if l[i] == min(l[i-left:i+right+1]):
-            lows.append((i, l[i]))
-    return highs, lows
-def _calc_rebound_pct(df_4h, lookback=20):
-    if df_4h is None or len(df_4h) < lookback:
-        return np.nan
-    recent = df_4h.iloc[-lookback:]
-    low = recent["low"].min()
-    high = recent["high"].max()
-    close = recent["close"].iloc[-1]
-    if pd.isna(low) or low <= 0 or pd.isna(high):
-        return np.nan
-    total_range = (high - low) / low
-    rebound_pct = (close - low) / low
-    return rebound_pct
 # =========================================================
 # 1. 日线空头背景
 # =========================================================
@@ -177,7 +67,7 @@ def eval_short_background(df_daily, df_4h):
             metrics.append("日线EMA50 < EMA200 (+5)")
         else:
             metrics.append("日线EMA50 >= EMA200 (+0)")
-        if not _has_hh_hl_structure(d, lookback=20):
+        if not has_hh_hl_structure(d, lookback=20):
             score += 5
             metrics.append("日线未形成HH+HL牛市反转结构 (+5)")
         else:
@@ -234,8 +124,8 @@ def eval_short_resistance_zone(df_daily, df_4h):
         logger.error("NOK! Resistance zone data deficiency")
         return Res["ERR"], None
     try:
-        d = _calc_boll(df_daily.copy(), window=20, std_mul=2)
-        h4 = _calc_boll(df_4h.copy(), window=20, std_mul=2)
+        d = calc_boll(df_daily.copy(), window=20, std_mul=2)
+        h4 = calc_boll(df_4h.copy(), window=20, std_mul=2)
         last_d = d.iloc[-1]
         last_4h = h4.iloc[-1]
         current_price = last_4h["close"]
@@ -243,45 +133,45 @@ def eval_short_resistance_zone(df_daily, df_4h):
         metrics = []
         daily_hit = 0
         h4_hit = 0
-        atr_ratio = _calc_atr(h4, 14).iloc[-1] / current_price if current_price > 0 else 0.01
+        atr_ratio = calc_atr(h4, 14).iloc[-1] / current_price if current_price > 0 else 0.01
         top_threshold = 0.75 if atr_ratio < 0.02 else 0.80
-        range_pos = _calc_range_position(h4, lookback=50)
+        range_pos = calc_range_position(h4, lookback=50)
         if not pd.isna(range_pos) and range_pos >= top_threshold:
             score += 10
             metrics.append(f"当前位于最近4H区间顶部 pos={round(range_pos, 3)} (动态阈>{top_threshold}) (+10)")
         else:
             metrics.append(f"未到4H顶部区域 pos={round(range_pos, 3) if not pd.isna(range_pos) else 'nan'} (+0)")
-        rebound_pct = _calc_rebound_pct(h4, lookback=24)
+        rebound_pct = calc_rebound_pct(h4, lookback=24)
         if not pd.isna(rebound_pct) and rebound_pct >= 0.03:
             score += 4
             metrics.append(f"最近4H已有反弹 rebound={round(rebound_pct * 100, 2)}% (+4)")
         else:
             metrics.append(f"反弹不足 rebound={round(rebound_pct * 100, 2) if not pd.isna(rebound_pct) else 'nan'}% (+0)")
         daily_prev_high = d["high"].iloc[-90:-1].max()
-        if _is_near_level(current_price, daily_prev_high, df=h4):
+        if is_near_level(current_price, daily_prev_high, df=h4):
             score += 8
             daily_hit += 1
             metrics.append("接近日线前高压力 (+8)")
-        if _is_near_level(current_price, last_d["bb_upper"], df=h4):
+        if is_near_level(current_price, last_d["bb_upper"], df=h4):
             score += 8
             daily_hit += 1
             metrics.append("接近日线BOLL上轨 (+8)")
         h4_prev_high = h4["high"].iloc[-60:-1].max()
-        if _is_near_level(current_price, h4_prev_high, df=h4):
+        if is_near_level(current_price, h4_prev_high, df=h4):
             score += 5
             h4_hit += 1
             metrics.append("接近4H前高压力 (+5)")
         h4_platform_high = h4["high"].iloc[-40:-10].max()
-        if _is_near_level(current_price, h4_platform_high, df=h4):
+        if is_near_level(current_price, h4_platform_high, df=h4):
             score += 4
             h4_hit += 1
             metrics.append("接近4H平台上沿 (+4)")
-        if _is_near_level(current_price, last_4h["bb_upper"], df=h4):
+        if is_near_level(current_price, last_4h["bb_upper"], df=h4):
             score += 4
             h4_hit += 1
             metrics.append("接近4H BOLL上轨 (+4)")
-        fib_info = _calc_fib_retracement_zone(h4, lookback=80)
-        if fib_info is not None and _in_zone(current_price, fib_info["zone_low"], fib_info["zone_high"]):
+        fib_info = calc_fib_retracement_zone(h4, lookback=80)
+        if fib_info is not None and in_zone(current_price, fib_info["zone_low"], fib_info["zone_high"]):
             score += 4
             h4_hit += 1
             metrics.append("进入4H fib 0.618~0.786回撤区 (+4)")
@@ -328,7 +218,7 @@ def eval_short_trigger_1h(df_1h, df_4h=None):
     try:
         h1 = df_1h.copy()
         h1["ema20"] = h1["close"].ewm(span=20, adjust=False).mean()
-        dif, dea, hist = _calc_macd(h1["close"])
+        dif, dea, hist = calc_macd(h1["close"])
         h1["dif"] = dif
         h1["dea"] = dea
         h1["hist"] = hist
@@ -340,7 +230,7 @@ def eval_short_trigger_1h(df_1h, df_4h=None):
         # 1️⃣ LH结构（前提）
         # =========================
         recent = h1.iloc[-40:]
-        swing_highs, _ = _find_local_swing_points(recent, left=2, right=2)
+        swing_highs, _ = find_local_swing_points(recent, left=2, right=2)
         lower_high = False
         strong_lh = False
         if len(swing_highs) >= 2:
@@ -419,7 +309,7 @@ def eval_short_trigger_1h(df_1h, df_4h=None):
         # 8️⃣ 位置过滤（🔥关键）
         # =========================
         if df_4h is not None:
-            pos = _calc_range_position(df_4h, lookback=40)
+            pos = calc_range_position(df_4h, lookback=40)
             if not pd.isna(pos):
                 if pos < 0.6:
                     score -= 3
@@ -457,10 +347,10 @@ def eval_short_risk(df_1h, df_4h):
     try:
         h1 = df_1h.copy()
         h4 = df_4h.copy()
-        atr_4h = _calc_atr(h4, period=14)
+        atr_4h = calc_atr(h4, period=14)
         atr_last = atr_4h.iloc[-1]
         current_price = h1["close"].iloc[-1]
-        swing_high = _find_recent_swing_high(h1, lookback=10)
+        swing_high = find_recent_swing_high(h1, lookback=10)
         if pd.isna(swing_high) or pd.isna(atr_last):
             return Res["ERR"], None
         stop_loss = swing_high + 0.3 * atr_last
@@ -510,8 +400,8 @@ def eval_exit(df_1h, df_4h, current_price, initial_stop, current_rr, peak_rr, re
     """
     try:
         ema20 = df_1h["close"].ewm(span=20, adjust=False).mean()
-        atr = _calc_atr(df_4h, period=14).iloc[-1]
-        rsi = _calc_rsi(df_1h["close"], period=14)
+        atr = calc_atr(df_4h, period=14).iloc[-1]
+        rsi = calc_rsi(df_1h["close"], period=14)
         action = StrategyResult.WAIT
         metric = "继续持有空单"
         # 1. 绝对硬止损：亏损达到 3% 无条件斩仓 (做空亏损时 return_pct 为负数)
@@ -619,35 +509,6 @@ def testsuite_result(df_1h,df_4h,df_daily):
     except Exception as e:
         logger.error(f"NOK! testsuite_short_result err:{e}")
         return Res["ERR"], total_score, parameters
-def _find_recent_swing_high(df, lookback=10):
-    """
-    寻找近期 N 根 K 线的最高点 (摆动高点)
-    """
-    if df is None or len(df) < lookback:
-        return np.nan
-        
-    # 直接在 'high' 列中截取最后 lookback 行，并求最大值
-    return df["high"].iloc[-lookback:].max()
-def _calc_atr(df, period=14):
-    """
-    计算 ATR (平均真实波动幅度)
-    """
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-    
-    # TR (True Range) 是以下三个值中的最大值：
-    # 1. 当天最高价 - 当天最低价
-    # 2. 绝对值(当天最高价 - 昨天收盘价)
-    # 3. 绝对值(当天最低价 - 昨天收盘价)
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs()
-    ], axis=1).max(axis=1)
-    
-    # 对 TR 进行 period 周期的移动平均，得出 ATR
-    return tr.rolling(period).mean()
 def calc_short_performance(entry_price, current_price, stop_loss_price=None):
     """
     计算做空仓位的表现 (收益率与盈亏比)

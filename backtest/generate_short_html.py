@@ -36,13 +36,15 @@ def _add_trade_interval_shapes(fig, trades_df: pd.DataFrame) -> None:
     if frame.empty:
         return
 
+    # Widen the background blocks a bit while keeping candlestick bodies unchanged.
+    pad = pd.Timedelta(minutes=30)
     for _, row in frame.iterrows():
         is_win = float(row["profit_abs"]) > 0
         fill = "rgba(14, 203, 129, 0.10)" if is_win else "rgba(246, 70, 93, 0.12)"
         fig.add_shape(
             type="rect",
-            x0=row["entry_time"],
-            x1=row["exit_time"],
+            x0=row["entry_time"] - pad,
+            x1=row["exit_time"] + pad,
             y0=0,
             y1=1,
             xref="x",
@@ -98,8 +100,9 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
             low=df["low"],
             close=df["close"],
             name="BTC/USDT",
-            increasing=dict(line=dict(color=increasing_color, width=1), fillcolor=increasing_color),
-            decreasing=dict(line=dict(color=decreasing_color, width=1), fillcolor=decreasing_color),
+            increasing=dict(line=dict(color=increasing_color, width=1.4), fillcolor=increasing_color),
+            decreasing=dict(line=dict(color=decreasing_color, width=1.4), fillcolor=decreasing_color),
+            whiskerwidth=0.9,
         ),
         row=1,
         col=1,
@@ -121,8 +124,8 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
                     y=df[col],
                     mode="lines",
                     name=label,
-                    line=dict(width=1.4, color=_pick_series_color(col)),
-                    opacity=0.95,
+                    line=dict(width=0.95, color=_pick_series_color(col)),
+                    opacity=0.82,
                     hovertemplate=f"{label}: %{{y:.2f}}<extra></extra>",
                 ),
                 row=1,
@@ -166,7 +169,7 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
             for index in buy_signals.index
         ]
         buy_marker_y = [
-            df.loc[index, "high"] * 1.006
+            df.loc[index, "high"] * 1.002
             for index in buy_signals.index
         ]
         buy_customdata = buy_signals[["timestamp", "buy_signal"]].to_numpy()
@@ -207,7 +210,7 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
             for index in sell_signals.index
         ]
         sell_marker_y = [
-            df.loc[index, "low"] * 0.994
+            df.loc[index, "low"] * 0.998
             for index in sell_signals.index
         ]
         hard_stop_mask = sell_signal_types.eq("HARD_STOP")
@@ -563,15 +566,26 @@ def generate_interactive_html_with_dashboard(df, backtest_report, output_name="s
     logger.success(f"Interactive dashboard generated: {{os.path.abspath(output_name)}}")
 
 
-def backtest_short_refined(df_4h, fee_rate=0.0004):
+def backtest_short_refined(
+    df_4h,
+    fee_rate=0.0004,            # single-side fee rate per trade leg
+    enable_streak_sizing=True,  # enable dynamic position sizing by win/loss streak
+    win_streak_threshold=2,     # start increasing size after this many consecutive wins
+    loss_streak_threshold=2,    # start decreasing size after this many consecutive losses
+    base_position_size=1.0,     # baseline entry size in BTC
+    win_streak_increment=0.2,   # +BTC per extra consecutive win after win threshold
+    loss_streak_decrement=0.2,  # -BTC per extra consecutive loss after loss threshold
+    max_position_size=2.0,      # hard cap of position size in BTC
+    min_position_size=0.0,      # hard floor of position size in BTC
+):
     """
     完善后的指标计算方法 (基准 1 BTC，连续两单亏损后下一单每次递减 0.2 BTC，绝对金额统计)
     fee_rate: 单边手续费，默认万四
     """
     position_queue = []
     trades = []
+    consecutive_wins = 0
     consecutive_losses = 0
-    current_position_size = 1.0
 
     for idx, row in df_4h.iterrows():
         buy_price = row.get("buy_signal")
@@ -579,10 +593,19 @@ def backtest_short_refined(df_4h, fee_rate=0.0004):
 
         # 做空入场
         if pd.notna(buy_price) and buy_price > 0:
+            position_size = base_position_size
+            if enable_streak_sizing:
+                if consecutive_wins >= win_streak_threshold:
+                    exceed_wins = consecutive_wins - win_streak_threshold + 1
+                    position_size += exceed_wins * win_streak_increment
+                if consecutive_losses >= loss_streak_threshold:
+                    exceed_losses = consecutive_losses - loss_streak_threshold + 1
+                    position_size -= exceed_losses * loss_streak_decrement
+                position_size = min(max_position_size, max(min_position_size, position_size))
             position_queue.append({
                 "entry_price": buy_price,
                 "entry_time": idx,
-                "position_size": current_position_size,
+                "position_size": float(position_size),
             })
 
         # 做空平仓
@@ -606,15 +629,11 @@ def backtest_short_refined(df_4h, fee_rate=0.0004):
                 })
 
                 if net_profit_usd < 0:
+                    consecutive_wins = 0
                     consecutive_losses += 1
                 else:
+                    consecutive_wins += 1
                     consecutive_losses = 0
-
-                if consecutive_losses >= 2:
-                    step_count = consecutive_losses - 1
-                    current_position_size = max(0.0, 1.0 - 0.2 * step_count)
-                else:
-                    current_position_size = 1.0
 
     if not trades:
         return {
@@ -696,7 +715,18 @@ if __name__ == "__main__":
         df_4h = pd.read_excel(four_path)
         df_4h.set_index("timestamp", inplace=True)
 
-        report_stats = backtest_short_refined(df_4h)
+        report_stats = backtest_short_refined(
+            df_4h=df_4h,
+            fee_rate=0.0004,            # 手续费率（单边）
+            enable_streak_sizing=False,  # 是否开启连赢/连亏动态仓位
+            win_streak_threshold=2,     # 连续盈利达到该值后，后续每单递增仓位
+            loss_streak_threshold=2,    # 连续亏损达到该值后，后续每单递减仓位
+            base_position_size=1.0,     # 基准开仓数量（BTC）
+            win_streak_increment=0.2,   # 连赢触发后每单递增数量（BTC）
+            loss_streak_decrement=0.2,  # 连亏触发后每单递减数量（BTC）
+            max_position_size=1.4,      # 开仓数量上限（BTC）
+            min_position_size=0.0,      # 开仓数量下限（BTC）
+        )
         generate_interactive_html_with_dashboard(df_4h, report_stats)
 
         print("\n" + "=" * 40)

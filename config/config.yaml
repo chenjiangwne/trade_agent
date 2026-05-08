@@ -4,7 +4,7 @@ basic:
   timeframe_1h: 1h
   timeframe_4h: 4h
   timeframe_daily: 1d
-  buypoint: 30
+  buypoint: 40
   buypoint_step: 100
   mode: paper
   max_attempts: 3
@@ -56,7 +56,7 @@ backtest:
 
 logging:
   console:
-    enabled: false
+    enabled: true
     level: DEBUG
     format: "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>"
   file:

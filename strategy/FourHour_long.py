@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-import numpy as np
 import pandas as pd
 from loguru import logger
+
+from generic.Common import calc_atr, calc_rsi, find_local_swing_points, find_recent_swing_low
 
 
 Res = {"OK": 0, "ERR": -1, "EXCEPTION": -2}
@@ -32,64 +33,6 @@ class Monitor:
 
 def _now_ts() -> int:
     return int(time.time() * 1000)
-
-
-def _calc_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high = df["high"]
-    low = df["low"]
-    close = df["close"]
-    tr = pd.concat(
-        [
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    return tr.rolling(period).mean()
-
-
-def _calc_rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-9)
-    return 100 - (100 / (1 + rs))
-
-
-def _find_recent_swing_low(df: pd.DataFrame, lookback: int = 10) -> float:
-    if df is None or len(df) < lookback:
-        return np.nan
-    return float(df["low"].iloc[-lookback:].min())
-
-
-def _range_position(df: pd.DataFrame, lookback: int = 40) -> float:
-    if df is None or len(df) < lookback:
-        return np.nan
-    recent = df.iloc[-lookback:]
-    low = recent["low"].min()
-    high = recent["high"].max()
-    close = recent["close"].iloc[-1]
-    if pd.isna(low) or pd.isna(high) or high <= low:
-        return np.nan
-    return float((close - low) / (high - low + 1e-9))
-
-
-def _find_local_swing_points(df: pd.DataFrame, left: int = 2, right: int = 2) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
-    if df is None or len(df) < left + right + 5:
-        return [], []
-    highs: list[tuple[int, float]] = []
-    lows: list[tuple[int, float]] = []
-    h = df["high"].values
-    l = df["low"].values
-    for i in range(left, len(df) - right):
-        if h[i] == max(h[i - left : i + right + 1]):
-            highs.append((i, float(h[i])))
-        if l[i] == min(l[i - left : i + right + 1]):
-            lows.append((i, float(l[i])))
-    return highs, lows
 
 
 def is_system_ready(df_4h: pd.DataFrame, df_daily: pd.DataFrame, allow_stale: bool = True) -> bool:
@@ -232,7 +175,7 @@ def eval_regime(df_4h: pd.DataFrame) -> tuple[int, Monitor | None]:
     close = h4["close"]
     high = h4["high"]
     low = h4["low"]
-    atr = _calc_atr(h4, 14)
+    atr = calc_atr(h4, 14)
     atr_mean = atr.rolling(50).mean()
     atr_ratio = atr.iloc[-1] / (atr_mean.iloc[-1] + 1e-9)
     ema15 = close.ewm(span=15, adjust=False).mean()
@@ -249,7 +192,7 @@ def eval_regime(df_4h: pd.DataFrame) -> tuple[int, Monitor | None]:
 
     plus_dm = high.diff().clip(lower=0)
     minus_dm = (-low.diff()).clip(lower=0)
-    tr_smooth = _calc_atr(h4, 14).ewm(alpha=1 / 14, adjust=False).mean()
+    tr_smooth = calc_atr(h4, 14).ewm(alpha=1 / 14, adjust=False).mean()
     plus_di = 100 * (plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / (tr_smooth + 1e-9))
     minus_di = 100 * (minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / (tr_smooth + 1e-9))
     dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)) * 100
@@ -311,7 +254,7 @@ def eval_rsi(df_4h: pd.DataFrame) -> tuple[int, Monitor | None]:
     if df_4h is None or len(df_4h) < 20:
         return Res["ERR"], None
 
-    rsi = _calc_rsi(df_4h["close"], 14)
+    rsi = calc_rsi(df_4h["close"], 14)
     rsi_t = rsi.iloc[-1]
     rsi_t1 = rsi.iloc[-2]
     rsi_t2 = rsi.iloc[-3]
@@ -338,9 +281,9 @@ def eval_long_risk(df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> tuple[int, Monit
         return Res["ERR"], None
 
     h4 = df_4h.copy()
-    atr_last = _calc_atr(h4, period=14).iloc[-1]
+    atr_last = calc_atr(h4, period=14).iloc[-1]
     current_price = float(df_1h["close"].iloc[-1])
-    swing_low = _find_recent_swing_low(df_1h, lookback=10)
+    swing_low = find_recent_swing_low(df_1h, lookback=10)
     if pd.isna(swing_low) or pd.isna(atr_last):
         return Res["ERR"], None
 
@@ -391,7 +334,7 @@ def eval_exit(
 ) -> tuple[int, Monitor | None]:
     try:
         ema20 = df_1h["close"].ewm(span=20, adjust=False).mean()
-        atr = _calc_atr(df_4h, period=14).iloc[-1]
+        atr = calc_atr(df_4h, period=14).iloc[-1]
         action = StrategyResult.WAIT
         metric = "hold long"
 
@@ -412,7 +355,7 @@ def eval_exit(
                 atr_mult = 1.5
             else:
                 atr_mult = 2.0
-            recent_highest_high = df_1h["high"].rolling(12).max().iloc[-1]
+            recent_highest_high = df_1h["high"].rolling(24).max().iloc[-1]
             trailing_stop = recent_highest_high - (atr_mult * atr)
             if current_price <= trailing_stop and current_rr > 0.5:
                 action = StrategyResult.EXIT
