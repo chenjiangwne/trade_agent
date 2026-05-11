@@ -167,8 +167,17 @@ decision=BUY score=9.0 metrics=daily_above_ema200 | daily_ema200_rising | 4h_ema
 - `timeframe_daily`
   当前为 `1d`
 
-- `buypoint`
+- `buypoint.short`
   入场阈值
+
+- `buypoint.long`
+  Long entry score threshold. Long backtest uses this value for long entries.
+
+- `buypoint_step.short`
+  Extra score required for each short add-on entry after an existing short position.
+
+- `buypoint_step.long`
+  Extra score required for each long add-on entry after an existing long position.
 
 ### `data`
 

@@ -4,8 +4,12 @@ basic:
   timeframe_1h: 1h
   timeframe_4h: 4h
   timeframe_daily: 1d
-  buypoint: 40
-  buypoint_step: 100
+  buypoint:
+    short: 40
+    long: 34
+  buypoint_step:
+    short: 100
+    long: 100
   mode: paper
   max_attempts: 3
 
@@ -28,6 +32,8 @@ data:
 
 status:
   status_file: config/status.json
+  short_status_file: config/status_short.json
+  long_status_file: config/status_long.json
 
 trade:
   paper_trade: false
@@ -44,6 +50,11 @@ runtime:
   run_forever: true
   run_delay_seconds: 5
   max_clock_diff_seconds: 60
+
+strategy:
+  enabled:
+    short: true
+    long: true
 
 backtest:
   strategy_mode: long_first_then_short

@@ -452,7 +452,7 @@ def eval_exit(df_1h, df_4h, current_price, initial_stop, current_rr, peak_rr, re
         logger.error(f"eval_exit_short error: {e}")
         return Res["ERR"], None
         
-def testsuite_result(df_1h,df_4h,df_daily):
+def testsuite_result(df_1h,df_4h,df_daily, log_title: str = "<red>[SHORT]</red>"):
     res = Res["OK"]
     total_score = 0
     metrics = []
@@ -462,10 +462,10 @@ def testsuite_result(df_1h,df_4h,df_daily):
         res_bg, background = eval_short_background(df_daily, df_4h)
         res_zone, zone = eval_short_resistance_zone(df_daily, df_4h)
         if res_bg != Res["OK"] or background is None:
-            logger.error("NOK! eval_short_background failed")
+            logger.opt(colors=True).error(f"{log_title} NOK! eval_short_background failed")
             return Res["ERR"], total_score, parameters
         if res_zone != Res["OK"] or zone is None:
-            logger.error("NOK! eval_short_resistance_zone failed")
+            logger.opt(colors=True).error(f"{log_title} NOK! eval_short_resistance_zone failed")
             return Res["ERR"], total_score, parameters
         if background.score >= 14 and zone.score >= 20:
             if background.score >= 22:
@@ -492,9 +492,9 @@ def testsuite_result(df_1h,df_4h,df_daily):
                 "eval_short_risk": eval_short_risk(df_1h, df_4h),
             }
             for name, (result, monitor) in test_cases.items():
-                logger.info(f"test_case:{name} -> execute Result is>> {result}, detail: {monitor}")
+                logger.opt(colors=True).info(f"{log_title} test_case:{name} -> execute Result is>> {result}, detail: {monitor}")
                 if result != Res["OK"] or monitor is None:
-                    logger.error(f"NOK! {name} execute failed")
+                    logger.opt(colors=True).error(f"{log_title} NOK! {name} execute failed")
                     return Res["ERR"], total_score, parameters
                 total_score += monitor.score
                 metrics.append(f"[{name}] {monitor.metric}")
@@ -504,10 +504,10 @@ def testsuite_result(df_1h,df_4h,df_daily):
             parameters["risk_stop_price"] = risk_stop_price
             return res, total_score, parameters
         else:
-            logger.warning("NOK! preconditions are not met!")
+            logger.opt(colors=True).warning(f"{log_title} NOK! preconditions are not met!")
             return res, total_score, parameters
     except Exception as e:
-        logger.error(f"NOK! testsuite_short_result err:{e}")
+        logger.opt(colors=True).error(f"{log_title} NOK! testsuite_short_result err:{e}")
         return Res["ERR"], total_score, parameters
 def calc_short_performance(entry_price, current_price, stop_loss_price=None):
     """

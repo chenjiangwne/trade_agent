@@ -25,6 +25,14 @@ def yml_reader(yml_file=None):
     return d_yml
 
 
+def get_directional_basic_value(config, key, direction, default=None):
+    basic = config.get("basic", {}) if isinstance(config, dict) else {}
+    value = basic.get(key, default)
+    if isinstance(value, dict):
+        return value.get(direction, value.get("default", default))
+    return value
+
+
 def get_traceback(comment=""):
     """
     Description: Get traceback info to error log.

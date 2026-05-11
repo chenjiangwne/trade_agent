@@ -11,7 +11,7 @@ logger.debug(PROJECT_ROOT)
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from generic.Common import calc_atr, find_recent_swing_high, yml_reader
+from generic.Common import calc_atr, find_recent_swing_high, get_directional_basic_value, yml_reader
 from generic.logger import init_report
 from services.market_data_service import _load_table, _resolve_data_file
 # import strategy.FourHour_long as strategy_module
@@ -51,8 +51,8 @@ def backtest():
         
 
         config = yml_reader(str(project_root / "config" / "config.yaml"))
-        buypoint = config['basic']['buypoint']
-        buypoint_step = int(config.get("basic", {}).get("buypoint_step", 3))
+        buypoint = float(get_directional_basic_value(config, "buypoint", "short", 0))
+        buypoint_step = float(get_directional_basic_value(config, "buypoint_step", "short", 3))
         init_report(config["logging"], attempt=1, log_name="backtest")
         logger.info("backtest starting")
         logger.debug(config)

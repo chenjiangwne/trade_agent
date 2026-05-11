@@ -355,7 +355,7 @@ def eval_exit(
                 atr_mult = 1.5
             else:
                 atr_mult = 2.0
-            recent_highest_high = df_1h["high"].rolling(24).max().iloc[-1]
+            recent_highest_high = df_1h["high"].rolling(12).max().iloc[-1]
             trailing_stop = recent_highest_high - (atr_mult * atr)
             if current_price <= trailing_stop and current_rr > 0.5:
                 action = StrategyResult.EXIT
@@ -373,7 +373,12 @@ def eval_exit(
         return Res["ERR"], None
 
 
-def testsuite_result(df_1h: pd.DataFrame, df_4h: pd.DataFrame, df_daily: pd.DataFrame) -> tuple[int, float, dict[str, Any]]:
+def testsuite_result(
+    df_1h: pd.DataFrame,
+    df_4h: pd.DataFrame,
+    df_daily: pd.DataFrame,
+    log_title: str = "<green>[LONG]</green>",
+) -> tuple[int, float, dict[str, Any]]:
     total_score = 0.0
     parameters: dict[str, Any] = {}
     metrics: list[str] = []
@@ -391,7 +396,7 @@ def testsuite_result(df_1h: pd.DataFrame, df_4h: pd.DataFrame, df_daily: pd.Data
 
         monitors: dict[str, Monitor] = {}
         for name, (result, monitor) in checks.items():
-            logger.info(f"test_case:{name} -> execute Result is>> {result}, detail: {monitor}")
+            logger.opt(colors=True).info(f"{log_title} test_case:{name} -> execute Result is>> {result}, detail: {monitor}")
             if result != Res["OK"] or monitor is None:
                 parameters.update({"failed_case": name, "metric_str": " | ".join(metrics)})
                 return Res["ERR"], total_score, parameters
@@ -419,7 +424,7 @@ def testsuite_result(df_1h: pd.DataFrame, df_4h: pd.DataFrame, df_daily: pd.Data
             return Res["OK"], 0.0, parameters
 
         for name, monitor in monitors.items():
-            weight = 1.5 if name == "eval_long_trigger_1h" else 1.0
+            weight = 2 if name == "eval_long_trigger_1h" else 1.0
             total_score += float(monitor.score) * weight
             metrics.append(f"[{name}] {monitor.metric}")
             if monitor.fallback_value:
@@ -430,7 +435,7 @@ def testsuite_result(df_1h: pd.DataFrame, df_4h: pd.DataFrame, df_daily: pd.Data
         parameters["total_score"] = total_score
         return Res["OK"], total_score, parameters
     except Exception as exc:
-        logger.error(f"NOK! testsuite_long_result err:{exc}")
+        logger.opt(colors=True).error(f"{log_title} NOK! testsuite_long_result err:{exc}")
         return Res["ERR"], total_score, parameters
 
 
@@ -446,3 +451,12 @@ def calc_long_performance(entry_price: float, current_price: float, stop_loss_pr
         elif initial_risk < 0:
             rr = 0.0
     return {"return_pct": return_pct, "rr": rr}
+
+#BTC 每次固定 1 BTC 做多回测报告 (绝对金额)34
+# ========================================
+# 总交易次数: 77
+# 胜率: 49.35%
+# 总净利润: 34,464.23
+# 平均盈亏: 447.59
+# 盈亏比: 2.52
+# 最大回撤(USD): -6,797.70
